@@ -1,0 +1,9 @@
+{
+  "id": 14,
+  "name": "Обучение пользователей ERP",
+  "content": "Провести тренинги по модулю закупок",
+  "status": "IN_PROGRESS",
+  "userId": 1,
+  "applicantId": 3,
+  "projectId": 2
+}

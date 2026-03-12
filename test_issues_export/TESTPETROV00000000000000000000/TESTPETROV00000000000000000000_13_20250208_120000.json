@@ -1,0 +1,9 @@
+{
+  "id": 13,
+  "name": "Миграция данных ERP",
+  "content": "Перенос справочников в новую систему",
+  "status": "NEW",
+  "userId": 3,
+  "applicantId": 1,
+  "projectId": 2
+}

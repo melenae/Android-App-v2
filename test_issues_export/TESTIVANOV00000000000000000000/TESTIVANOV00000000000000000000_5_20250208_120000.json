@@ -1,0 +1,9 @@
+{
+  "id": 5,
+  "name": "Ещё новая задача",
+  "content": "Описание новой задачи",
+  "status": "NEW",
+  "userId": 2,
+  "applicantId": 1,
+  "projectId": 2
+}

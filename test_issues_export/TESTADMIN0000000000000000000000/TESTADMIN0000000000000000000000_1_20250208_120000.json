@@ -1,0 +1,9 @@
+{
+  "id": 1,
+  "name": "Настроить сервер",
+  "content": "Установить и настроить тестовый сервер",
+  "status": "NEW",
+  "userId": 1,
+  "applicantId": 2,
+  "projectId": 1
+}

@@ -1,0 +1,9 @@
+petrov@company.ru_2323_f47ac10b-58cc-4372-a567-0e02b2c3d479_20250208_120000 — копия
+EmailПолучателя_IDProject_IDBaseSender
+
+EmailПолучателя  - 
+IDProject_ID Гуид32
+IDBaseSender Гуид32
+IDMessage Гуид32
+Updated  20260213090954           YYYYMMDDHHMMSS
+

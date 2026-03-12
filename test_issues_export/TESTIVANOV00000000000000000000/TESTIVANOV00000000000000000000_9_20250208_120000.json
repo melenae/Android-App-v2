@@ -1,0 +1,9 @@
+{
+  "id": 9,
+  "name": "Согласование ТЗ",
+  "content": "Утвердить требования с заказчиком",
+  "status": "AWAITING",
+  "userId": 2,
+  "applicantId": 1,
+  "projectId": 2
+}

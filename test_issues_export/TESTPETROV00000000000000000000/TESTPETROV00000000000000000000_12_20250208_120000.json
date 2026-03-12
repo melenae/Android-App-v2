@@ -1,0 +1,9 @@
+{
+  "id": 12,
+  "name": "Деплой на стенд",
+  "content": "Развернуть версию 2.1",
+  "status": "TESTING",
+  "userId": 3,
+  "applicantId": 2,
+  "projectId": 3
+}

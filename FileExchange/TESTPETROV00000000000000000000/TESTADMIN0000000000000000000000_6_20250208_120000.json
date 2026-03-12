@@ -1,0 +1,9 @@
+{
+  "id": 6,
+  "name": "Подключить БД",
+  "content": "Настроить подключение к PostgreSQL",
+  "status": "NEW",
+  "userId": 1,
+  "applicantId": 3,
+  "projectId": 3
+}

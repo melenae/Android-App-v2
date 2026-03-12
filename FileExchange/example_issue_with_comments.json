@@ -1,0 +1,29 @@
+{
+  "id": 1,
+  "name": "Настроить сервер",
+  "content": "Установить и настроить тестовый сервер",
+  "status": "NEW",
+  "userId": 1,
+  "applicantId": 2,
+  "projectId": 1,
+  "projectSlug": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "dateUpdate": 1707350400000,
+  "comments": [
+    {
+      "id": "COMMENT000000000000000000000001",
+      "userId": 1,
+      "authorId": 1,
+      "comment": "Нужно уточнить сроки поставки",
+      "dateCreate": 1700000000000,
+      "statusSet": null
+    },
+    {
+      "id": "COMMENT000000000000000000000002",
+      "userId": 2,
+      "authorId": 2,
+      "comment": "Согласовано на пятницу",
+      "dateCreate": 1700000100000,
+      "statusSet": "IN_PROGRESS"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "id": 7,
+  "name": "Рефакторинг API",
+  "content": "Вынести общую логику в сервис",
+  "status": "IN_PROGRESS",
+  "userId": 2,
+  "applicantId": 3,
+  "projectId": 2
+}

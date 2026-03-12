@@ -1,0 +1,46 @@
+[
+  {
+    "id": 101,
+    "name": "Импорт: Настроить сервер",
+    "content": "Установить и настроить тестовый сервер из JSON",
+    "status": "NEW",
+    "userId": 1,
+    "applicantId": 2,
+    "projectId": 1
+  },
+  {
+    "id": 102,
+    "name": "Импорт: Рефакторинг API",
+    "content": "Вынести общую логику в сервис",
+    "status": "IN_PROGRESS",
+    "userId": 2,
+    "applicantId": 1,
+    "projectId": 2
+  },
+  {
+    "id": 103,
+    "name": "Импорт: Интеграция с 1С",
+    "content": "Настроить обмен по заказам",
+    "status": "AWAITING",
+    "userId": 1,
+    "applicantId": 3,
+    "projectId": 3
+  },
+  {
+    "id": 104,
+    "name": "Импорт: Приёмка модуля",
+    "content": "Финальное тестирование",
+    "status": "TESTING",
+    "userId": 3,
+    "applicantId": 2,
+    "projectId": 2
+  },
+  {
+    "id": 105,
+    "name": "Импорт: Задача без проекта",
+    "content": "Тестовая заявка без привязки к проекту",
+    "status": "NEW",
+    "userId": 2,
+    "applicantId": 1
+  }
+]
