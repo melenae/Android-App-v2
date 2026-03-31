@@ -1,15 +1,19 @@
 package com.tools.toolapp_v2
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -31,7 +35,10 @@ import java.util.Date
 import java.util.Locale
 
 private const val ROW_HEIGHT_DP = 36f
-private const val LABEL_WIDTH_DP = 140f
+/** Высота строки этапа графика: название + User в скобках, несколько строк. */
+private const val MAIN_STAGE_ROW_HEIGHT_DP = 56f
+private const val DETAIL_ROW_MIN_HEIGHT_DP = 36f
+private const val LABEL_WIDTH_DP = 196f
 private const val AXIS_HEIGHT_DP = 28f
 
 /** Цвет полосы по этапу (step). */
@@ -53,6 +60,7 @@ internal fun GanttTimeAxis(
 ) {
     val density = LocalDensity.current
     val totalMs = (rangeEndMs - rangeStartMs).toFloat().coerceAtLeast(1f)
+    val minLabelSpacingPx = with(density) { 56.dp.toPx() }
     val monthFormat = remember { SimpleDateFormat("MMM yyyy", Locale.US) }
     val monthLabels = remember(rangeStartMs, rangeEndMs) {
         val cal = Calendar.getInstance(Locale.US)
@@ -72,17 +80,31 @@ internal fun GanttTimeAxis(
         }
         list
     }
+    val visibleMonthTicks = remember(monthLabels, chartWidthPx, minLabelSpacingPx, rangeStartMs, totalMs) {
+        var lastX = -Float.MAX_VALUE
+        buildList {
+            monthLabels.forEach { (monthStartMs, label) ->
+                val xPx = ((monthStartMs - rangeStartMs) / totalMs * chartWidthPx).toFloat().coerceIn(0f, chartWidthPx - 1f)
+                if (isEmpty() || xPx - lastX >= minLabelSpacingPx) {
+                    add(xPx to label)
+                    lastX = xPx
+                }
+            }
+        }
+    }
     Box(
         modifier = Modifier
             .height(AXIS_HEIGHT_DP.dp)
             .width(with(density) { chartWidthPx.toDp() })
     ) {
-        monthLabels.forEach { (monthStartMs, label) ->
-            val xPx = ((monthStartMs - rangeStartMs) / totalMs * chartWidthPx).toFloat().coerceIn(0f, chartWidthPx - 1f)
+        visibleMonthTicks.forEach { (xPx, label) ->
             Text(
                 text = label,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Clip,
                 modifier = Modifier
                     .offset(x = with(density) { xPx.toDp() }, y = 2.dp)
                     .padding(horizontal = 2.dp)
@@ -119,15 +141,45 @@ internal fun GanttBar(
     }
 }
 
+private fun noteDescriptionText(note: Notes): String {
+    val t = (note.content ?: "").trim().replace("\n", " ").trim()
+    return t.ifEmpty { "—" }
+}
+
+/** Подпись строки этапа: название и ответственный (как в таблицах). */
+private fun roadMapStageLabelWithUser(rm: RoadMap): String {
+    val title = rm.name.ifBlank { "Без названия" }
+    val u = rm.user
+    val who = if (u == null) {
+        "—"
+    } else {
+        val email = u.email.takeIf { it.isNotBlank() } ?: u.login
+        userDisplayId(u.displayName, email)
+    }
+    return "$title ($who)"
+}
+
+private fun userKey(u: Users): String =
+    userDisplayId(
+        u.displayName,
+        u.email.takeIf { it.isNotBlank() } ?: u.login
+    )
+
+/** Список графиков; в ландшафте больше места для шкалы. Ориентация активности для вкладки не фиксируется — см. [MainScreen]. */
 @Composable
 fun RoadMapScreen(
     roadMaps: List<RoadMap>,
-    loadStatusMessage: String?,
+    currentUser: Users,
+    issues: List<Issues>,
+    notes: List<Notes>,
+    pmProjectIds: Set<String> = emptySet(),
     onItemClick: (RoadMap) -> Unit,
+    onIssueClick: (Issues) -> Unit = {},
+    onNoteClick: (Notes) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current
-    val rowHeightPx = with(density) { ROW_HEIGHT_DP.dp.toPx() }
+    val mainStageRowHeightPx = with(density) { MAIN_STAGE_ROW_HEIGHT_DP.dp.toPx() }
     val axisHeightPx = with(density) { AXIS_HEIGHT_DP.dp.toPx() }
 
     val (rangeStartMs, rangeEndMs, totalDays) = remember(roadMaps) {
@@ -158,87 +210,183 @@ fun RoadMapScreen(
         Triple(start, end, days)
     }
 
-    val surface = MaterialTheme.colorScheme.surface
-    val isDark = (0.299f * surface.red + 0.587f * surface.green + 0.114f * surface.blue) < 0.5f
-
-    Column(modifier = modifier.fillMaxSize()) {
-        loadStatusMessage?.let { msg ->
-            Text(
-                text = msg,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
+    val detailsByRoadMapId = remember(roadMaps, issues, notes, currentUser, pmProjectIds) {
+        roadMaps.associate { rm ->
+            rm.id to Pair(
+                activeIssuesForCurrentUserOnRoadMap(rm.id, issues, currentUser, pmProjectIds),
+                activeNotesForCurrentUserOnRoadMap(rm.id, notes, currentUser, pmProjectIds)
             )
         }
+    }
+
+    val surface = MaterialTheme.colorScheme.surface
+    val isDark = (0.299f * surface.red + 0.587f * surface.green + 0.114f * surface.blue) < 0.5f
+    val detailStripColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.22f)
+    val scrollState = rememberScrollState()
+
+    Column(modifier = modifier.fillMaxSize()) {
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
             val availableChartWidthDp = maxWidth - LABEL_WIDTH_DP.dp
             val chartWidthPx = with(density) { availableChartWidthDp.toPx() }.coerceAtLeast(0f)
 
-            Row(modifier = Modifier.fillMaxSize()) {
-            // Левая колонка: подпись оси времени + названия строк
-            Column(modifier = Modifier.width(LABEL_WIDTH_DP.dp)) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(AXIS_HEIGHT_DP.dp),
-                    contentAlignment = Alignment.Center
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(scrollState)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "Этап / период",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                roadMaps.forEach { item ->
                     Box(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .height(ROW_HEIGHT_DP.dp)
-                            .clickable { onItemClick(item) }
-                            .padding(horizontal = 4.dp, vertical = 4.dp),
-                        contentAlignment = Alignment.CenterStart
+                            .width(LABEL_WIDTH_DP.dp)
+                            .height(AXIS_HEIGHT_DP.dp),
+                        contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = item.name.ifBlank { "Без названия" },
-                            style = MaterialTheme.typography.bodyMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            text = "Этап / период",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Box(modifier = Modifier.weight(1f)) {
+                        GanttTimeAxis(
+                            rangeStartMs = rangeStartMs,
+                            rangeEndMs = rangeEndMs,
+                            totalDays = totalDays,
+                            heightPx = axisHeightPx,
+                            chartWidthPx = chartWidthPx
                         )
                     }
                 }
-            }
-            // Правая часть: ось времени + полосы Ганта (ширина = оставшееся место на экране)
-            Column(modifier = Modifier.fillMaxWidth()) {
-                GanttTimeAxis(
-                    rangeStartMs = rangeStartMs,
-                    rangeEndMs = rangeEndMs,
-                    totalDays = totalDays,
-                    heightPx = axisHeightPx,
-                    chartWidthPx = chartWidthPx
-                )
-                // Строки с полосами
+
                 roadMaps.forEach { item ->
-                    Box(
+                    val (issueRows, noteRows) = detailsByRoadMapId[item.id] ?: (emptyList<Issues>() to emptyList())
+
+                    Row(
                         modifier = Modifier
-                            .height(ROW_HEIGHT_DP.dp)
                             .fillMaxWidth()
-                            .clickable { onItemClick(item) }
+                            .height(MAIN_STAGE_ROW_HEIGHT_DP.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        GanttBar(
-                            startMs = item.start,
-                            endMs = item.end,
-                            rangeStartMs = rangeStartMs,
-                            rangeEndMs = rangeEndMs,
-                            chartWidthPx = chartWidthPx,
-                            rowHeightPx = rowHeightPx,
-                            barColor = barColorForStep(item.step, isDark, MaterialTheme.colorScheme)
-                        )
+                        Box(
+                            modifier = Modifier
+                                .width(LABEL_WIDTH_DP.dp)
+                                .fillMaxHeight()
+                                .clickable { onItemClick(item) }
+                                .padding(horizontal = 6.dp, vertical = 6.dp),
+                            contentAlignment = Alignment.CenterStart
+                        ) {
+                            Text(
+                                text = roadMapStageLabelWithUser(item),
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                                ),
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 3,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .clickable { onItemClick(item) }
+                        ) {
+                            GanttBar(
+                                startMs = item.start,
+                                endMs = item.end,
+                                rangeStartMs = rangeStartMs,
+                                rangeEndMs = rangeEndMs,
+                                chartWidthPx = chartWidthPx,
+                                rowHeightPx = mainStageRowHeightPx,
+                                barColor = barColorForStep(item.step, isDark, MaterialTheme.colorScheme)
+                            )
+                        }
+                    }
+
+                    issueRows.forEach { issue ->
+                        val isIssueForCurrentUser =
+                            issue.user?.let { userKey(it) == userKey(currentUser) } == true
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = DETAIL_ROW_MIN_HEIGHT_DP.dp)
+                                .clickable { onIssueClick(issue) },
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .width(LABEL_WIDTH_DP.dp)
+                                    .padding(horizontal = 6.dp, vertical = 4.dp),
+                                contentAlignment = Alignment.CenterStart
+                            ) {
+                                Text(
+                                    text = "Задача",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxWidth()
+                                    .background(detailStripColor)
+                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                                contentAlignment = Alignment.CenterStart
+                            ) {
+                                Text(
+                                    text = issue.name.ifBlank { "Без названия" },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (isIssueForCurrentUser) Color.Blue else MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 3,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+
+                    noteRows.forEach { note ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = DETAIL_ROW_MIN_HEIGHT_DP.dp)
+                                .clickable { onNoteClick(note) },
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .width(LABEL_WIDTH_DP.dp)
+                                    .padding(horizontal = 6.dp, vertical = 4.dp),
+                                contentAlignment = Alignment.CenterStart
+                            ) {
+                                Text(
+                                    text = "Стикер",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxWidth()
+                                    .background(detailStripColor)
+                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                                contentAlignment = Alignment.CenterStart
+                            ) {
+                                Text(
+                                    text = noteDescriptionText(note),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (note.user?.let { userKey(it) == userKey(currentUser) } == true) Color.Blue else MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 4,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
                     }
                 }
             }
         }
-    }
     }
 }

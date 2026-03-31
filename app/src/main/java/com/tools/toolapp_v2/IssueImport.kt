@@ -234,7 +234,17 @@ fun loadIssuesFromCsv(
 ): List<IssueLoadItem> {
     val usersByRef = usersByIdAndLegacy(users)
     val projectsByRef = projectsByIdAndLegacy(projects)
-    val companiesById = companies.associateBy { it.id.toString() }
+    val companiesById = companies.associateBy { it.id.toString() }.toMutableMap()
+    val companiesByName = companies
+        .groupBy { it.name.trim().lowercase() }
+        .mapValues { (_, v) -> v.firstOrNull() }
+        .toMutableMap()
+    val companiesByProjectAndName = companies
+        .filter { !it.project?.id.isNullOrBlank() }
+        .groupBy { (it.project?.id ?: "") to it.name.trim().lowercase() }
+        .mapValues { (_, v) -> v.firstOrNull() }
+        .toMutableMap()
+    var nextTempCompanyId = (companies.minOfOrNull { it.id } ?: 0L) - 1L
     /** Представление текущего пользователя для сравнения с колонками User/Applicant: «ФИО (адрес почты)» — та же логика, что в таблице. */
     val currentUserDisplay = currentUser?.let { userDisplayId(it.displayName, it.email.takeIf { it.isNotBlank() } ?: it.login) }
     if (currentUser != null)
@@ -273,21 +283,34 @@ fun loadIssuesFromCsv(
     val applicantIdx = header.indexOfFirst { it.equals("applicant", ignoreCase = true) }.takeIf { it >= 0 }
         ?: header.indexOfFirst { it.equals("applicantId", ignoreCase = true) }.takeIf { it >= 0 }
         ?: header.indexOfFirst { it.equals("Постановщик", ignoreCase = true) }.takeIf { it >= 0 } ?: -1
-    val projectIdx = header.indexOfFirst { it.equals("project", ignoreCase = true) }.takeIf { it >= 0 }
-        ?: header.indexOfFirst { it.equals("projectId", ignoreCase = true) }.takeIf { it >= 0 }
-        ?: header.indexOfFirst { it.equals("Проект", ignoreCase = true) }.takeIf { it >= 0 } ?: -1
+    val projectIdx = if (header.size > 7) 7 else (
+        header.indexOfFirst { it.equals("project", ignoreCase = true) }.takeIf { it >= 0 }
+            ?: header.indexOfFirst { it.equals("projectId", ignoreCase = true) }.takeIf { it >= 0 }
+            ?: header.indexOfFirst { it.equals("Проект", ignoreCase = true) }.takeIf { it >= 0 } ?: -1
+        )
+    onDebugLog("Issues: колонка project индекс=${if (projectIdx >= 0) projectIdx else "не найдена"}")
     val companyIdx = header.indexOfFirst { it.equals("company", ignoreCase = true) }.coerceAtLeast(-1)
+    onDebugLog("Issues: колонка company индекс=${if (companyIdx >= 0) companyIdx else "не найдена"}")
     val dateUpdateIdx = header.indexOfFirst { it.equals("dateUpdate", ignoreCase = true) }.coerceAtLeast(-1)
     val onTimingIdx = header.indexOfFirst { it.equals("onTiming", ignoreCase = true) }.coerceAtLeast(-1)
     val newCommentForUserIdx = header.indexOfFirst { it.equals("newCommentForUser", ignoreCase = true) }.coerceAtLeast(-1)
     val newCommentForApplicantIdx = header.indexOfFirst { it.equals("newCommentForApplicant", ignoreCase = true) }.coerceAtLeast(-1)
-    val sourceTypeIdx = header.indexOfFirst { it.equals("source_type", ignoreCase = true) }.coerceAtLeast(-1)
-    val sourceIdx = header.indexOfFirst { it.equals("source", ignoreCase = true) }.coerceAtLeast(-1)
-    val roadMapIdx = listOf(
-        header.indexOfFirst { it.equals("roadMap", ignoreCase = true) },
-        header.indexOfFirst { it.equals("roadMapId", ignoreCase = true) },
-        header.indexOfFirst { it.equals("График", ignoreCase = true) }
-    ).firstOrNull { it >= 0 } ?: -1
+    val roadMapIdx = when {
+        header.size > 15 -> 15
+        header.size > 14 -> 14
+        header.size > 13 -> 13
+        else -> listOf(
+            header.indexOfFirst { it.equals("roadMap", ignoreCase = true) },
+            header.indexOfFirst { it.equals("roadMapId", ignoreCase = true) },
+            header.indexOfFirst { it.equals("График", ignoreCase = true) }
+        ).firstOrNull { it >= 0 } ?: -1
+    }
+    onDebugLog("Issues: колонка roadMap индекс=${if (roadMapIdx >= 0) roadMapIdx else "не найдена"}")
+    val previewRow = lines.getOrNull(1)?.let { splitCsvLine(it) }.orEmpty()
+    val previewCompanyRaw = if (previewRow.size > 8) previewRow[8].trim().removeSurrounding("\"") else ""
+    onDebugLog("Issues: строка 2, колонка 9 (company) raw=\"$previewCompanyRaw\"")
+    var issueCompanyReadCount = 0
+    var issueCompanyMatchedCount = 0
     val list = mutableListOf<IssueLoadItem>()
     for (i in 1 until lines.size) {
         val cells = splitCsvLine(lines[i])
@@ -310,13 +333,43 @@ fun loadIssuesFromCsv(
         val companyRef = if (companyIdx >= 0) cells.getOrNull(companyIdx)?.trim()?.takeIf { it.isNotBlank() } else null
         val (user, applicant) = resolveUserAndApplicant(userRef, applicantRef, usersByRef, currentUser)
         val project = resolveProjectFromCell(projectRef, projectsByRef)
-        val company = companyRef?.let { companiesById[it] } ?: companyRef?.toLongOrNull()?.let { companiesById[it.toString()] }
-        val dateUpdate = if (dateUpdateIdx >= 0) parseCsvLong(cells.getOrNull(dateUpdateIdx)) ?: 0L else 0L
+        val company = companyRef?.let { ref ->
+            val normalized = ref.trim()
+            val byProjectName = project?.id?.let { projectId ->
+                companiesByProjectAndName[projectId to normalized.lowercase()]
+            }
+            val byName = companiesByName[normalized.lowercase()]
+            val byId = companiesById[normalized] ?: normalized.toLongOrNull()?.let { companiesById[it.toString()] }
+            val found = byProjectName ?: byName ?: byId
+            if (found != null) {
+                found
+            } else {
+                // Если компании в справочнике нет — создаём временный элемент в памяти и привязываем к проекту.
+                val created = Companies(
+                    id = nextTempCompanyId--,
+                    name = normalized,
+                    content = "",
+                    project = project,
+                    user = null,
+                    applicant = null
+                )
+                companiesById[created.id.toString()] = created
+                companiesByName.putIfAbsent(created.name.trim().lowercase(), created)
+                if (project?.id != null) {
+                    companiesByProjectAndName.putIfAbsent(project.id to created.name.trim().lowercase(), created)
+                }
+                onDebugLog("Issues: company upsert -> создана новая company id=${created.id}, name=\"${created.name}\", projectId=\"${project?.id ?: ""}\"")
+                created
+            }
+        }
+        if (companyRef != null) {
+            issueCompanyReadCount += 1
+            if (company != null) issueCompanyMatchedCount += 1
+        }
+        val dateUpdate = if (dateUpdateIdx >= 0) parseDateUpdateField(cells.getOrNull(dateUpdateIdx)) else 0L
         val onTiming = if (onTimingIdx >= 0) parseCsvBoolean(cells.getOrNull(onTimingIdx)) else false
         val newCommentForUser = if (newCommentForUserIdx >= 0) parseCsvBoolean(cells.getOrNull(newCommentForUserIdx)) else false
         val newCommentForApplicant = if (newCommentForApplicantIdx >= 0) parseCsvBoolean(cells.getOrNull(newCommentForApplicantIdx)) else false
-        val sourceType = if (sourceTypeIdx >= 0) cells.getOrNull(sourceTypeIdx)?.trim() ?: "" else ""
-        val source = if (sourceIdx >= 0) cells.getOrNull(sourceIdx)?.trim() ?: "" else ""
         val roadMapId = if (roadMapIdx >= 0) cells.getOrNull(roadMapIdx)?.trim() ?: "" else ""
         if (userRef != null && user == null)
             onDebugLog("Строка ${i + 1} (id=$id): User \"$userRef\" ${if (currentUserDisplay != null) "не совпадает с текущим пользователем (\"" + currentUserDisplay + "\")" else "не найден в списке пользователей"} — заявка не попадёт в «Мои»")
@@ -324,7 +377,8 @@ fun loadIssuesFromCsv(
             val userStatus = if (user != null) "найден (id=${user.id})" else "не найден"
             val applicantStatus = if (applicant != null) "найден (id=${applicant.id})" else "не найден"
             val projectStatus = if (project != null) "найден (${project.name})" else "не найден"
-            onDebugLog("Строка 2 (1-я с данными): id=$id, name=\"$name\", User=\"$userRef\" → $userStatus, Applicant=\"$applicantRef\" → $applicantStatus, Project=\"$projectRef\" → $projectStatus. В «Мои» попадёт только если User или Applicant = текущий пользователь.")
+            val companyStatus = if (company != null) "найдена (id=${company.id}, name=${company.name})" else "не найдена"
+            onDebugLog("Строка 2 (1-я с данными): id=$id, name=\"$name\", User=\"$userRef\" → $userStatus, Applicant=\"$applicantRef\" → $applicantStatus, Project=\"$projectRef\" → $projectStatus, companyRaw=\"${companyRef ?: ""}\" → $companyStatus, roadMapRaw=\"${roadMapId}\". В «Мои» попадёт только если User или Applicant = текущий пользователь.")
         }
         list.add(
             IssueLoadItem(
@@ -341,18 +395,20 @@ fun loadIssuesFromCsv(
                     onTiming = onTiming,
                     newCommentForUser = newCommentForUser,
                     newCommentForApplicant = newCommentForApplicant,
-                    source_type = sourceType,
-                    source = source
+                    source_type = "",
+                    source = ""
                 ),
                 roadMapId = roadMapId
             )
         )
     }
+    onDebugLog("Issues: прочитано company=${issueCompanyReadCount}, сопоставлено=${issueCompanyMatchedCount}, без соответствия=${issueCompanyReadCount - issueCompanyMatchedCount}")
     return list
 }
 
 /** Парсит булево: ИСТИНА/TRUE/true/1/да/yes -> true (уже есть parseCsvBoolean выше, но для Notes нужна публичная аналогия). */
 private fun parseNoteDone(s: String?): Boolean = parseCsvBoolean(s)
+private fun parseDateUpdateField(s: String?): Long = parseDateFromCell(s)
 
 /**
  * Парсит CSV с заметками (лист notes). Заголовки: id/guid (опционально), content/Описание, project, User, applicant, company, done, onTiming.
@@ -370,7 +426,17 @@ fun loadNotesFromCsv(
 ): List<NoteLoadItem> {
     val usersByRef = usersByIdAndLegacy(users)
     val projectsByRef = projectsByIdAndLegacy(projects)
-    val companiesById = companies.associateBy { it.id.toString() }
+    val companiesById = companies.associateBy { it.id.toString() }.toMutableMap()
+    val companiesByName = companies
+        .groupBy { it.name.trim().lowercase() }
+        .mapValues { (_, v) -> v.firstOrNull() }
+        .toMutableMap()
+    val companiesByProjectAndName = companies
+        .filter { !it.project?.id.isNullOrBlank() }
+        .groupBy { (it.project?.id ?: "") to it.name.trim().lowercase() }
+        .mapValues { (_, v) -> v.firstOrNull() }
+        .toMutableMap()
+    var nextTempCompanyId = (companies.minOfOrNull { it.id } ?: 0L) - 1L
     val lines = csvContent.lines().filter { it.isNotBlank() }
     if (lines.size < 2) return emptyList()
     val sep = if (lines[0].contains(';')) ';' else ','
@@ -395,7 +461,8 @@ fun loadNotesFromCsv(
         header.indexOfFirst { it.equals("content", ignoreCase = true) },
         header.indexOfFirst { it.equals("Описание", ignoreCase = true) }
     ).coerceAtLeast(-1)
-    val projectIdx = header.indexOfFirst { it.equals("project", ignoreCase = true) }.coerceAtLeast(-1)
+    val projectIdx = if (header.size > 6) 6 else header.indexOfFirst { it.equals("project", ignoreCase = true) }.coerceAtLeast(-1)
+    onDebugLog("Notes: колонка project индекс=${if (projectIdx >= 0) projectIdx else "не найдена"}")
     val userIdx = listOf(
         header.indexOfFirst { it.equals("user", ignoreCase = true) },
         header.indexOfFirst { it.equals("Пользователь", ignoreCase = true) }
@@ -405,16 +472,20 @@ fun loadNotesFromCsv(
         header.indexOfFirst { it.equals("Постановщик", ignoreCase = true) }
     ).firstOrNull { it >= 0 } ?: -1
     val companyIdx = header.indexOfFirst { it.equals("company", ignoreCase = true) }.coerceAtLeast(-1)
+    onDebugLog("Notes: колонка company индекс=${if (companyIdx >= 0) companyIdx else "не найдена"}")
     val doneIdx = header.indexOfFirst { it.equals("done", ignoreCase = true) }.coerceAtLeast(-1)
     val dateUpdateIdx = header.indexOfFirst { it.equals("dateUpdate", ignoreCase = true) }.coerceAtLeast(-1)
     val onTimingIdx = header.indexOfFirst { it.equals("onTiming", ignoreCase = true) }.coerceAtLeast(-1)
-    val sourceTypeIdx = header.indexOfFirst { it.equals("source_type", ignoreCase = true) }.coerceAtLeast(-1)
-    val sourceIdx = header.indexOfFirst { it.equals("source", ignoreCase = true) }.coerceAtLeast(-1)
-    val roadMapIdx = listOf(
-        header.indexOfFirst { it.equals("roadMap", ignoreCase = true) },
-        header.indexOfFirst { it.equals("roadMapId", ignoreCase = true) },
-        header.indexOfFirst { it.equals("График", ignoreCase = true) }
-    ).firstOrNull { it >= 0 } ?: -1
+    val roadMapIdx = when {
+        header.size > 11 -> 11
+        header.size > 10 -> 10
+        else -> listOf(
+            header.indexOfFirst { it.equals("roadMap", ignoreCase = true) },
+            header.indexOfFirst { it.equals("roadMapId", ignoreCase = true) },
+            header.indexOfFirst { it.equals("График", ignoreCase = true) }
+        ).firstOrNull { it >= 0 } ?: -1
+    }
+    onDebugLog("Notes: колонка roadMap индекс=${if (roadMapIdx >= 0) roadMapIdx else "не найдена"}")
     val list = mutableListOf<NoteLoadItem>()
     for (i in 1 until lines.size) {
         val rawCells = splitCsvLine(lines[i])
@@ -433,6 +504,7 @@ fun loadNotesFromCsv(
         val userRef = if (userIdx >= 0) cells.getOrNull(userIdx)?.trim()?.takeIf { it.isNotBlank() } else null
         val applicantRef = if (applicantIdx >= 0) cells.getOrNull(applicantIdx)?.trim()?.takeIf { it.isNotBlank() } else null
         val companyRef = if (companyIdx >= 0) cells.getOrNull(companyIdx)?.trim()?.takeIf { it.isNotBlank() } else null
+        val roadMapId = if (roadMapIdx >= 0) cells.getOrNull(roadMapIdx)?.trim() ?: "" else ""
         val project = resolveProjectFromCell(projectCell, projectsByRef)
         val (user, applicant) = resolveUserAndApplicant(userRef, applicantRef, usersByRef, currentUser)
         val done = if (doneIdx >= 0) parseNoteDone(cells.getOrNull(doneIdx)) else false
@@ -440,24 +512,42 @@ fun loadNotesFromCsv(
             val outcome = when {
                 id == null -> "пропуск: нет id (idRaw=\"$idRaw\", content=\"${content.take(30)}\", userFilled=$userFilled, applicantFilled=$applicantFilled)"
                 done -> "пропуск: done=TRUE"
-                else -> "загружена: id=$id, User=\"$userRef\"→${user?.id ?: "не найден"}, Applicant=\"$applicantRef\"→${applicant?.id ?: "не найден"}, project=${project?.name ?: "не найден"}"
+                else -> "загружена: id=$id, User=\"$userRef\"→${user?.id ?: "не найден"}, Applicant=\"$applicantRef\"→${applicant?.id ?: "не найден"}, project=${project?.name ?: "не найден"}, companyRaw=\"${companyRef ?: ""}\", roadMapRaw=\"${roadMapId}\""
             }
             onDebugLog("Notes строка 2 (1-я с данными): $outcome")
         }
         if (id == null) continue
-        val company = companyRef?.let { companiesById[it] } ?: companyRef?.toLongOrNull()?.let { companiesById[it.toString()] }
+        val company = companyRef?.let { ref ->
+            val normalized = ref.trim()
+            val byProjectName = project?.id?.let { projectId ->
+                companiesByProjectAndName[projectId to normalized.lowercase()]
+            }
+            val byName = companiesByName[normalized.lowercase()]
+            val byId = companiesById[normalized] ?: normalized.toLongOrNull()?.let { companiesById[it.toString()] }
+            val found = byProjectName ?: byName ?: byId
+            if (found != null) {
+                found
+            } else {
+                val created = Companies(
+                    id = nextTempCompanyId--,
+                    name = normalized,
+                    content = "",
+                    project = project,
+                    user = null,
+                    applicant = null
+                )
+                companiesById[created.id.toString()] = created
+                companiesByName.putIfAbsent(created.name.trim().lowercase(), created)
+                if (project?.id != null) {
+                    companiesByProjectAndName.putIfAbsent(project.id to created.name.trim().lowercase(), created)
+                }
+                onDebugLog("Notes: company upsert -> создана новая company id=${created.id}, name=\"${created.name}\", projectId=\"${project?.id ?: ""}\"")
+                created
+            }
+        }
         if (done) continue
         val onTiming = if (onTimingIdx >= 0) parseCsvBoolean(cells.getOrNull(onTimingIdx)) else false
-        val dateUpdate = if (dateUpdateIdx >= 0) {
-            val v = cells.getOrNull(dateUpdateIdx)?.trim()
-            when {
-                v.isNullOrBlank() -> 0L
-                else -> (v.toDoubleOrNull()?.toLong() ?: v.toLongOrNull()) ?: 0L
-            }
-        } else 0L
-        val sourceType = if (sourceTypeIdx >= 0) cells.getOrNull(sourceTypeIdx)?.trim() ?: "" else ""
-        val source = if (sourceIdx >= 0) cells.getOrNull(sourceIdx)?.trim() ?: "" else ""
-        val roadMapId = if (roadMapIdx >= 0) cells.getOrNull(roadMapIdx)?.trim() ?: "" else ""
+        val dateUpdate = if (dateUpdateIdx >= 0) parseDateUpdateField(cells.getOrNull(dateUpdateIdx)) else 0L
         list.add(
             NoteLoadItem(
                 note = Notes(
@@ -470,8 +560,8 @@ fun loadNotesFromCsv(
                     content = content,
                     dateUpdate = dateUpdate,
                     onTiming = onTiming,
-                    source_type = sourceType,
-                    source = source
+                    source_type = "",
+                    source = ""
                 ),
                 roadMapId = roadMapId
             )
@@ -481,7 +571,7 @@ fun loadNotesFromCsv(
 }
 
 /**
- * Парсит CSV с записями журнала (лист projectLogs). Заголовки: id, type, date, content, agenda, resolution, user, applicant, project, onTiming, source_type, source.
+ * Парсит CSV с записями журнала (лист projectLogs). Заголовки: id, type, date, content, agenda, resolution, user, applicant, Проект, project, company, dateUpdate, onTiming, roadMap.
  * User и applicant ищутся по представлению «ФИО (адрес почты)» (та же логика, что для Issues и Notes).
  * Строки с пустым id пропускаются.
  */
@@ -495,6 +585,17 @@ fun loadProjectLogsFromCsv(
 ): List<ProjectLogLoadItem> {
     val usersByRef = usersByIdAndLegacy(users)
     val projectsByRef = projectsByIdAndLegacy(projects)
+    val companiesById = companies.associateBy { it.id.toString() }.toMutableMap()
+    val companiesByName = companies
+        .groupBy { it.name.trim().lowercase() }
+        .mapValues { (_, v) -> v.firstOrNull() }
+        .toMutableMap()
+    val companiesByProjectAndName = companies
+        .filter { !it.project?.id.isNullOrBlank() }
+        .groupBy { (it.project?.id ?: "") to it.name.trim().lowercase() }
+        .mapValues { (_, v) -> v.firstOrNull() }
+        .toMutableMap()
+    var nextTempCompanyId = (companies.minOfOrNull { it.id } ?: 0L) - 1L
     val lines = csvContent.lines().filter { it.isNotBlank() }
     if (lines.size < 2) return emptyList()
     val sep = if (lines[0].contains(';')) ';' else ','
@@ -521,15 +622,21 @@ fun loadProjectLogsFromCsv(
     val resolutionIdx = header.indexOfFirst { it.equals("resolution", ignoreCase = true) }.coerceAtLeast(-1)
     val userIdx = header.indexOfFirst { it.equals("user", ignoreCase = true) }.coerceAtLeast(-1)
     val applicantIdx = header.indexOfFirst { it.equals("applicant", ignoreCase = true) }.coerceAtLeast(-1)
-    val projectIdx = header.indexOfFirst { it.equals("project", ignoreCase = true) }.coerceAtLeast(-1)
+    val projectIdx = if (header.size > 9) 9 else header.indexOfFirst { it.equals("project", ignoreCase = true) }.coerceAtLeast(-1)
+    onDebugLog("ProjectLogs: колонка project индекс=${if (projectIdx >= 0) projectIdx else "не найдена"}")
+    val companyIdx = header.indexOfFirst { it.equals("company", ignoreCase = true) }.coerceAtLeast(-1)
+    onDebugLog("ProjectLogs: колонка company индекс=${if (companyIdx >= 0) companyIdx else "не найдена"}")
     val onTimingIdx = header.indexOfFirst { it.equals("onTiming", ignoreCase = true) }.coerceAtLeast(-1)
-    val sourceTypeIdx = header.indexOfFirst { it.equals("source_type", ignoreCase = true) }.coerceAtLeast(-1)
-    val sourceIdx = header.indexOfFirst { it.equals("source", ignoreCase = true) }.coerceAtLeast(-1)
-    val roadMapIdx = listOf(
-        header.indexOfFirst { it.equals("roadMap", ignoreCase = true) },
-        header.indexOfFirst { it.equals("roadMapId", ignoreCase = true) },
-        header.indexOfFirst { it.equals("График", ignoreCase = true) }
-    ).firstOrNull { it >= 0 } ?: -1
+    val roadMapIdx = when {
+        header.size > 14 -> 14
+        header.size > 13 -> 13
+        else -> listOf(
+            header.indexOfFirst { it.equals("roadMap", ignoreCase = true) },
+            header.indexOfFirst { it.equals("roadMapId", ignoreCase = true) },
+            header.indexOfFirst { it.equals("График", ignoreCase = true) }
+        ).firstOrNull { it >= 0 } ?: -1
+    }
+    onDebugLog("ProjectLogs: колонка roadMap индекс=${if (roadMapIdx >= 0) roadMapIdx else "не найдена"}")
     val list = mutableListOf<ProjectLogLoadItem>()
     for (i in 1 until lines.size) {
         val rawCells = splitCsvLine(lines[i])
@@ -545,19 +652,47 @@ fun loadProjectLogsFromCsv(
         val agenda = if (agendaIdx >= 0) cells.getOrNull(agendaIdx)?.trim() ?: "" else ""
         val resolution = if (resolutionIdx >= 0) cells.getOrNull(resolutionIdx)?.trim() ?: "" else ""
         val projectCell = if (projectIdx >= 0) cells.getOrNull(projectIdx) else null
+        val companyRef = if (companyIdx >= 0) cells.getOrNull(companyIdx)?.trim()?.takeIf { it.isNotBlank() } else null
         val userRef = if (userIdx >= 0) cells.getOrNull(userIdx)?.trim()?.takeIf { it.isNotBlank() } else null
         val applicantRef = if (applicantIdx >= 0) cells.getOrNull(applicantIdx)?.trim()?.takeIf { it.isNotBlank() } else null
         val project = resolveProjectFromCell(projectCell, projectsByRef)
         val (user, applicant) = resolveUserAndApplicant(userRef, applicantRef, usersByRef, currentUser)
+        val company = companyRef?.let { ref ->
+            val normalized = ref.trim()
+            val byProjectName = project?.id?.let { projectId ->
+                companiesByProjectAndName[projectId to normalized.lowercase()]
+            }
+            val byName = companiesByName[normalized.lowercase()]
+            val byId = companiesById[normalized] ?: normalized.toLongOrNull()?.let { companiesById[it.toString()] }
+            val found = byProjectName ?: byName ?: byId
+            if (found != null) {
+                found
+            } else {
+                val created = Companies(
+                    id = nextTempCompanyId--,
+                    name = normalized,
+                    content = "",
+                    project = project,
+                    user = null,
+                    applicant = null
+                )
+                companiesById[created.id.toString()] = created
+                companiesByName.putIfAbsent(created.name.trim().lowercase(), created)
+                if (project?.id != null) {
+                    companiesByProjectAndName.putIfAbsent(project.id to created.name.trim().lowercase(), created)
+                }
+                onDebugLog("ProjectLogs: company upsert -> создана новая company id=${created.id}, name=\"${created.name}\", projectId=\"${project?.id ?: ""}\"")
+                created
+            }
+        }
         val onTiming = if (onTimingIdx >= 0) parseCsvBoolean(cells.getOrNull(onTimingIdx)) else false
-        val sourceType = if (sourceTypeIdx >= 0) cells.getOrNull(sourceTypeIdx)?.trim() ?: "" else ""
-        val source = if (sourceIdx >= 0) cells.getOrNull(sourceIdx)?.trim() ?: "" else ""
         val roadMapId = if (roadMapIdx >= 0) cells.getOrNull(roadMapIdx)?.trim() ?: "" else ""
         if (i == 1) {
             val userMatch = user?.id == currentUser?.id
             val applicantMatch = applicant?.id == currentUser?.id
-            val outcome = if (userMatch || applicantMatch) "загружена: id=$id, User=\"$userRef\"→${user?.id ?: "не найден"}, Applicant=\"$applicantRef\"→${applicant?.id ?: "не найден"}"
-                else "пропуск (не user/applicant): id=$id, User=\"$userRef\", Applicant=\"$applicantRef\""
+            val companyStatus = if (company != null) "найдена (id=${company.id}, name=${company.name})" else "не найдена"
+            val outcome = if (userMatch || applicantMatch) "загружена: id=$id, User=\"$userRef\"→${user?.id ?: "не найден"}, Applicant=\"$applicantRef\"→${applicant?.id ?: "не найден"}, companyRaw=\"${companyRef ?: ""}\" → $companyStatus, roadMapRaw=\"${roadMapId}\""
+                else "пропуск (не user/applicant): id=$id, User=\"$userRef\", Applicant=\"$applicantRef\", companyRaw=\"${companyRef ?: ""}\" → $companyStatus, roadMapRaw=\"${roadMapId}\""
             onDebugLog("ProjectLogs строка 2 (1-я с данными): $outcome")
         }
         list.add(
@@ -572,9 +707,10 @@ fun loadProjectLogsFromCsv(
                     resolution = resolution,
                     type = type,
                     date = date,
+                    company = company,
                     onTiming = onTiming,
-                    source_type = sourceType,
-                    source = source
+                    source_type = "",
+                    source = ""
                 ),
                 roadMapId = roadMapId
             )
@@ -584,7 +720,7 @@ fun loadProjectLogsFromCsv(
 }
 
 /**
- * Парсит CSV с элементами дорожной карты (лист roadMaps). Заголовки: id, Название, Описание, step, start, end, User, Проект, project, dateUpdate, onTiming, source_type, source.
+ * Парсит CSV с элементами дорожной карты (лист roadMaps). Заголовки: id, Название, Описание, step, start, end, User, Проект, project, company, dateUpdate, onTiming.
  * User ищется по представлению «ФИО (адрес почты)» (та же логика, что для Issues, Notes, projectLogs).
  * Строки с пустым id пропускаются.
  */
@@ -592,6 +728,7 @@ fun loadRoadMapsFromCsv(
     csvContent: String,
     users: List<Users>,
     projects: List<Projects>,
+    onDebugLog: (String) -> Unit = {},
     currentUser: Users? = null
 ): List<RoadMap> {
     val usersByRef = usersByIdAndLegacy(users)
@@ -615,17 +752,24 @@ fun loadRoadMapsFromCsv(
     }
     val header = splitCsvLine(lines[0]).map { it.removeSurrounding("\"") }
     val idIdx = header.indexOfFirst { it.equals("id", ignoreCase = true) }.takeIf { it >= 0 } ?: return emptyList()
-    val nameIdx = header.indexOfFirst { it.equals("Название", ignoreCase = true) }.coerceAtLeast(-1)
-    val contentIdx = header.indexOfFirst { it.equals("Описание", ignoreCase = true) }.coerceAtLeast(-1)
+    val nameIdx = if (header.size > 1) 1 else listOf(
+        header.indexOfFirst { it.equals("name", ignoreCase = true) },
+        header.indexOfFirst { it.equals("Название", ignoreCase = true) }
+    ).firstOrNull { it >= 0 } ?: -1
+    val contentIdx = if (header.size > 2) 2 else listOf(
+        header.indexOfFirst { it.equals("content", ignoreCase = true) },
+        header.indexOfFirst { it.equals("Описание", ignoreCase = true) }
+    ).firstOrNull { it >= 0 } ?: -1
     val stepIdx = header.indexOfFirst { it.equals("step", ignoreCase = true) }.coerceAtLeast(-1)
     val startIdx = header.indexOfFirst { it.equals("start", ignoreCase = true) }.coerceAtLeast(-1)
     val endIdx = header.indexOfFirst { it.equals("end", ignoreCase = true) }.coerceAtLeast(-1)
     val userIdx = header.indexOfFirst { it.equals("User", ignoreCase = true) }.coerceAtLeast(-1)
-    val projectIdx = header.indexOfFirst { it.equals("project", ignoreCase = true) }.coerceAtLeast(-1)
+    val projectIdx = if (header.size > 8) 8 else header.indexOfFirst { it.equals("project", ignoreCase = true) }.coerceAtLeast(-1)
+    onDebugLog("RoadMaps: колонка name индекс=${if (nameIdx >= 0) nameIdx else "не найдена"}")
+    onDebugLog("RoadMaps: колонка content индекс=${if (contentIdx >= 0) contentIdx else "не найдена"}")
+    onDebugLog("RoadMaps: колонка project индекс=${if (projectIdx >= 0) projectIdx else "не найдена"}")
     val dateUpdateIdx = header.indexOfFirst { it.equals("dateUpdate", ignoreCase = true) }.coerceAtLeast(-1)
     val onTimingIdx = header.indexOfFirst { it.equals("onTiming", ignoreCase = true) }.coerceAtLeast(-1)
-    val sourceTypeIdx = header.indexOfFirst { it.equals("source_type", ignoreCase = true) }.coerceAtLeast(-1)
-    val sourceIdx = header.indexOfFirst { it.equals("source", ignoreCase = true) }.coerceAtLeast(-1)
     val list = mutableListOf<RoadMap>()
     for (i in 1 until lines.size) {
         val rawCells = splitCsvLine(lines[i])
@@ -645,10 +789,8 @@ fun loadRoadMapsFromCsv(
         val userRef = if (userIdx >= 0) cells.getOrNull(userIdx)?.trim()?.takeIf { it.isNotBlank() } else null
         val project = resolveProjectFromCell(projectCell, projectsByRef)
         val user = resolveUserAndApplicant(userRef, null, usersByRef, currentUser).first
-        val dateUpdate = if (dateUpdateIdx >= 0) parseCsvLong(cells.getOrNull(dateUpdateIdx)) ?: 0L else 0L
+        val dateUpdate = if (dateUpdateIdx >= 0) parseDateUpdateField(cells.getOrNull(dateUpdateIdx)) else 0L
         val onTiming = if (onTimingIdx >= 0) parseCsvBoolean(cells.getOrNull(onTimingIdx)) else false
-        val sourceType = if (sourceTypeIdx >= 0) cells.getOrNull(sourceTypeIdx)?.trim() ?: "" else ""
-        val source = if (sourceIdx >= 0) cells.getOrNull(sourceIdx)?.trim() ?: "" else ""
         list.add(
             RoadMap(
                 id = id,
@@ -661,8 +803,8 @@ fun loadRoadMapsFromCsv(
                 project = project,
                 dateUpdate = dateUpdate,
                 onTiming = onTiming,
-                source_type = sourceType,
-                source = source
+                source_type = "",
+                source = ""
             )
         )
     }
@@ -774,8 +916,6 @@ private fun loadNotesFromSheet(
     val doneIdx = colIndex("done")
     val dateUpdateIdx = colIndex("dateUpdate")
     val onTimingIdx = colIndex("onTiming")
-    val sourceTypeIdx = colIndex("source_type")
-    val sourceIdx = colIndex("source")
     val list = mutableListOf<Notes>()
     for (rowNum in 1..sheet.lastRowNum) {
         val row = sheet.getRow(rowNum) ?: continue
@@ -797,16 +937,8 @@ private fun loadNotesFromSheet(
         val company = companyRef?.let { companiesById[it] } ?: companyRef?.toLongOrNull()?.let { companiesById[it.toString()] }
         val done = if (doneIdx >= 0) parseCsvBoolean(cellToString(row.getCell(doneIdx))) else false
         if (done) continue
-        val dateUpdate = if (dateUpdateIdx >= 0) {
-            val v = cellToString(row.getCell(dateUpdateIdx))?.trim()
-            when {
-                v.isNullOrBlank() -> 0L
-                else -> (v.toDoubleOrNull()?.toLong() ?: v.toLongOrNull()) ?: 0L
-            }
-        } else 0L
+        val dateUpdate = if (dateUpdateIdx >= 0) parseDateUpdateField(cellToString(row.getCell(dateUpdateIdx))) else 0L
         val onTiming = if (onTimingIdx >= 0) parseCsvBoolean(cellToString(row.getCell(onTimingIdx))) else false
-        val sourceType = if (sourceTypeIdx >= 0) cellToString(row.getCell(sourceTypeIdx))?.trim() ?: "" else ""
-        val source = if (sourceIdx >= 0) cellToString(row.getCell(sourceIdx))?.trim() ?: "" else ""
         list.add(
             Notes(
                 id = id,
@@ -818,8 +950,8 @@ private fun loadNotesFromSheet(
                 content = content,
                 dateUpdate = dateUpdate,
                 onTiming = onTiming,
-                source_type = sourceType,
-                source = source
+                source_type = "",
+                source = ""
             )
         )
     }
@@ -882,7 +1014,10 @@ private fun parseDateFromCell(s: String?, onDebug: (String) -> Unit = {}): Long 
         }
     }
     val formats = listOf(
+        "yyyy-MM-dd HH:mm:ss",
         "yyyy-MM-dd HH:mm", "yyyy-MM-dd",
+        "yyyy/MM/dd HH:mm:ss",
+        "yyyy/MM/dd HH:mm",
         "yyyy/MM/dd",
         "dd.MM.yyyy", "d.M.yyyy", "dd.MM.yy", "d.M.yy",
         "dd/MM/yyyy", "d/M/yyyy"
@@ -927,8 +1062,6 @@ private fun loadProjectLogsFromSheet(
     val applicantIdx = colIndex("applicant")
     val projectIdx = colIndex("project")
     val onTimingIdx = colIndex("onTiming")
-    val sourceTypeIdx = colIndex("source_type")
-    val sourceIdx = colIndex("source")
     val list = mutableListOf<ProjectLogs>()
     for (rowNum in 1..sheet.lastRowNum) {
         val row = sheet.getRow(rowNum) ?: continue
@@ -947,8 +1080,6 @@ private fun loadProjectLogsFromSheet(
         val project = resolveProjectFromCell(projectCell, projectsByRef)
         val (user, applicant) = resolveUserAndApplicant(userRef, applicantRef, usersByRef, null)
         val onTiming = if (onTimingIdx >= 0) parseCsvBoolean(cellToString(row.getCell(onTimingIdx))) else false
-        val sourceType = if (sourceTypeIdx >= 0) cellToString(row.getCell(sourceTypeIdx))?.trim() ?: "" else ""
-        val source = if (sourceIdx >= 0) cellToString(row.getCell(sourceIdx))?.trim() ?: "" else ""
         list.add(
             ProjectLogs(
                 id = id,
@@ -961,8 +1092,8 @@ private fun loadProjectLogsFromSheet(
                 type = type,
                 date = date,
                 onTiming = onTiming,
-                source_type = sourceType,
-                source = source
+                source_type = "",
+                source = ""
             )
         )
     }
@@ -1031,8 +1162,6 @@ fun loadIssuesFromXlsx(
     val onTimingIdx = colIndex("onTiming")
     val newCommentForUserIdx = colIndex("newCommentForUser")
     val newCommentForApplicantIdx = colIndex("newCommentForApplicant")
-    val sourceTypeIdx = colIndex("source_type", "sourceType")
-    val sourceIdx = colIndex("source")
     val list = mutableListOf<Issues>()
     val newCommentsList = mutableListOf<IssueComments>()
     val diagnostics = mutableListOf<String>()
@@ -1085,12 +1214,10 @@ fun loadIssuesFromXlsx(
             diagnostics.add(diagLine(rowNum, false, projectRef, project, userRef, user, applicantRef, applicant, reason))
             continue
         }
-        val dateUpdate = if (dateUpdateIdx >= 0) parseCsvLong(cellToString(row.getCell(dateUpdateIdx))) ?: 0L else 0L
+        val dateUpdate = if (dateUpdateIdx >= 0) parseDateUpdateField(cellToString(row.getCell(dateUpdateIdx))) else 0L
         val onTiming = if (onTimingIdx >= 0) parseCsvBoolean(cellToString(row.getCell(onTimingIdx))) else false
         val newCommentForUser = if (newCommentForUserIdx >= 0) parseCsvBoolean(cellToString(row.getCell(newCommentForUserIdx))) else false
         val newCommentForApplicant = if (newCommentForApplicantIdx >= 0) parseCsvBoolean(cellToString(row.getCell(newCommentForApplicantIdx))) else false
-        val sourceType = if (sourceTypeIdx >= 0) cellToString(row.getCell(sourceTypeIdx))?.trim() ?: "" else ""
-        val source = if (sourceIdx >= 0) cellToString(row.getCell(sourceIdx))?.trim() ?: "" else ""
         diagnostics.add(diagLine(rowNum, true, projectRef, project, userRef, user, applicantRef, applicant))
         val issue = Issues(
             id = id,
@@ -1105,8 +1232,8 @@ fun loadIssuesFromXlsx(
             onTiming = onTiming,
             newCommentForUser = newCommentForUser,
             newCommentForApplicant = newCommentForApplicant,
-            source_type = sourceType,
-            source = source
+            source_type = "",
+            source = ""
         )
         list.add(issue)
         val cellD = row.getCell(contentIdx)
@@ -1441,7 +1568,7 @@ fun exportIssuesToXlsx(
         val workbook = XSSFWorkbook()
         val sheet = workbook.createSheet("Issues")
         val header = sheet.createRow(0)
-        listOf("id", "Название", "Описание", "status", "User", "applicant", "project", "company", "dateUpdate", "onTiming", "newCommentForUser", "newCommentForApplicant", "source_type", "source").forEachIndexed { i, v ->
+        listOf("id", "Название", "Описание", "status", "User", "applicant", "project", "company", "dateUpdate", "onTiming", "newCommentForUser", "newCommentForApplicant").forEachIndexed { i, v ->
             header.createCell(i).setCellValue(v)
         }
         val drawing = sheet.createDrawingPatriarch()
@@ -1471,13 +1598,11 @@ fun exportIssuesToXlsx(
             row.createCell(9).setCellValue(if (issue.onTiming) "ИСТИНА" else "ЛОЖЬ")
             row.createCell(10).setCellValue(if (issue.newCommentForUser) "ИСТИНА" else "ЛОЖЬ")
             row.createCell(11).setCellValue(if (issue.newCommentForApplicant) "ИСТИНА" else "ЛОЖЬ")
-            row.createCell(12).setCellValue(issue.source_type)
-            row.createCell(13).setCellValue(issue.source)
         }
         if (notes.isNotEmpty()) {
             val notesSheet = workbook.createSheet("notes")
             val notesHeader = notesSheet.createRow(0)
-            listOf("id", "done", "Описание", "User", "applicant", "Проект", "project", "company", "dateUpdate", "onTiming", "source_type", "source").forEachIndexed { i, v ->
+            listOf("id", "done", "content", "User", "applicant", "Проект", "project", "company", "dateUpdate", "onTiming").forEachIndexed { i, v ->
                 notesHeader.createCell(i).setCellValue(v)
             }
             notes.forEachIndexed { idx, note ->
@@ -1494,8 +1619,6 @@ fun exportIssuesToXlsx(
                 row.createCell(7).setCellValue(note.company?.id?.toString() ?: "")
                 row.createCell(8).setCellValue("")
                 row.createCell(9).setCellValue(if (note.onTiming) "TRUE" else "FALSE")
-                row.createCell(10).setCellValue(note.source_type)
-                row.createCell(11).setCellValue(note.source)
             }
         }
         outputFile.parentFile?.mkdirs()

@@ -71,11 +71,20 @@ fun ProjectLogFormScreen(
     var dateState by remember(log.id) { mutableStateOf(log.date) }
     var dateTimeStrState by remember(log.id) { mutableStateOf(formatLogDate(log.date)) }
     var projectState by remember(log.id) { mutableStateOf(log.project) }
+    var companyState by remember(log.id) { mutableStateOf(log.company) }
     var userState by remember(log.id) { mutableStateOf(log.user ?: currentUser) }
     var applicantState by remember(log.id) { mutableStateOf(log.applicant ?: currentUser) }
     var roadMapState by remember(log.id) { mutableStateOf(log.roadMap) }
     var onTimingState by remember(log.id) { mutableStateOf(log.onTiming) }
-    val roadMapsForProject = remember(projectState) { allRoadMaps.filter { it.project?.id == projectState?.id } }
+    val roadMapsForProject = remember(projectState, currentUser.id) {
+        allRoadMaps
+            .filter { it.project?.id == projectState?.id }
+            .filter { it.user?.id == currentUser.id }
+    }
+    val companiesForProject = remember(projectState, allCompanies) {
+        if (projectState == null) emptyList()
+        else allCompanies.filter { it.project?.id == projectState?.id }
+    }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -110,6 +119,7 @@ fun ProjectLogFormScreen(
                                 user = userState,
                                 applicant = applicantState,
                                 roadMap = roadMapState,
+                                company = companyState,
                                 onTiming = onTimingState
                             )
                         )
@@ -142,6 +152,7 @@ fun ProjectLogFormScreen(
         var projectDialogOpen by remember { mutableStateOf(false) }
         var typeDialogOpen by remember { mutableStateOf(false) }
         var roadMapDialogOpen by remember { mutableStateOf(false) }
+        var companyDialogOpen by remember { mutableStateOf(false) }
         var userDialogOpen by remember { mutableStateOf(false) }
         var applicantDialogOpen by remember { mutableStateOf(false) }
 
@@ -180,19 +191,30 @@ fun ProjectLogFormScreen(
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
-                OutlinedTextField(
-                    value = allCompanies.firstOrNull { it.project?.id == projectState?.id }?.name ?: "—",
-                    onValueChange = {},
-                    readOnly = true,
-                    enabled = false,
-                    label = { Text("Компания") },
-                    colors = OutlinedTextFieldDefaults.colors(
-                        disabledTextColor = MaterialTheme.colorScheme.onSurface,
-                        disabledBorderColor = MaterialTheme.colorScheme.outline,
-                        disabledLabelColor = MaterialTheme.colorScheme.onSurfaceVariant
-                    ),
-                    modifier = Modifier.weight(1f)
-                )
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clipToBounds()
+                        .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {
+                            companyDialogOpen = true
+                        }
+                ) {
+                    OutlinedTextField(
+                        value = companyState?.name ?: "Не выбрано",
+                        onValueChange = {},
+                        readOnly = true,
+                        enabled = false,
+                        label = { Text("Компания") },
+                        trailingIcon = { Icon(Icons.Default.ArrowDropDown, contentDescription = "Выбрать компанию") },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            disabledTextColor = MaterialTheme.colorScheme.onSurface,
+                            disabledBorderColor = MaterialTheme.colorScheme.outline,
+                            disabledTrailingIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            disabledLabelColor = MaterialTheme.colorScheme.onSurfaceVariant
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
             }
             Spacer(modifier = Modifier.height(12.dp))
             // График (roadMap) — выбор из списка по проекту
@@ -250,6 +272,43 @@ fun ProjectLogFormScreen(
                 )
             }
             Spacer(modifier = Modifier.height(12.dp))
+            if (companyDialogOpen) {
+                AlertDialog(
+                    onDismissRequest = { companyDialogOpen = false },
+                    title = { Text("Компания") },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(
+                                text = "Не выбрано",
+                                style = MaterialTheme.typography.bodyLarge,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        companyState = null
+                                        companyDialogOpen = false
+                                    }
+                                    .padding(vertical = 12.dp)
+                            )
+                            companiesForProject.forEach { company ->
+                                Text(
+                                    text = company.name,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            companyState = company
+                                            companyDialogOpen = false
+                                        }
+                                        .padding(vertical = 12.dp)
+                                )
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = { companyDialogOpen = false }) { Text("Отмена") }
+                    }
+                )
+            }
             if (projectDialogOpen) {
                 AlertDialog(
                     onDismissRequest = { projectDialogOpen = false },

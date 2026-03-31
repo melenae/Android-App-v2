@@ -46,14 +46,9 @@ suspend fun loadAppInit(accessToken: String): Result<AppData> = withContext(Disp
         } else {
             connection.errorStream?.bufferedReader(Charsets.UTF_8)?.readText() ?: ""
         }
-        AppDebugLog.clear()
         if (code !in 200..299) {
-            AppDebugLog.append("app_init ошибка (HTTP $code):")
-            AppDebugLog.append(body.ifBlank { "(тело пусто)" })
             return@withContext Result.failure(Exception("app_init: $code $body"))
         }
-        AppDebugLog.append("app_init ответ (всё что пришло):")
-        AppDebugLog.append(body.ifBlank { "(пустой ответ)" })
         val data = parseAppInitResponse(body)
         Result.success(data)
     } catch (e: Exception) {
@@ -63,8 +58,30 @@ suspend fun loadAppInit(accessToken: String): Result<AppData> = withContext(Disp
     }
 }
 
+/** Текстовое поле роли из JSON: не путать с JSON null и строкой "null". */
+private fun JSONObject.optNonBlankText(key: String): String? {
+    if (!has(key) || isNull(key)) return null
+    return optString(key).trim().takeIf { it.isNotEmpty() && !it.equals("null", ignoreCase = true) }
+}
+
+/**
+ * Роль текущего пользователя в проекте в элементе массива projects (app_init).
+ * Ключ в RPC обычно member_role; редко memberRole. Поле role у строки проекта не используем — это может быть другая семантика.
+ */
+private fun parseMemberRoleFromProjectElement(p: JSONObject): String? =
+    p.optNonBlankText("member_role") ?: p.optNonBlankText("memberRole")
+
+/**
+ * Роль участника в строке permitted_projects (если бэкенд отдаёт join с project_members).
+ */
+private fun parseMemberRoleFromPermittedRow(pp: JSONObject): String? =
+    pp.optNonBlankText("member_role")
+        ?: pp.optNonBlankText("memberRole")
+        ?: pp.optNonBlankText("role")
+
 private fun parseAppInitResponse(json: String): AppData {
     val root = JSONObject(json)
+    val sessionUserId = root.optJSONObject("user")?.optNonBlankText("id")
     val users = mutableListOf<Users>()
     val userById = mutableMapOf<String, Users>()
 
@@ -118,7 +135,8 @@ private fun parseAppInitResponse(json: String): AppData {
             val slug = p.optString("slug", "").ifBlank { id }
             val managerId = p.optString("manager_id").takeIf { it.isNotBlank() }
             val manager = managerId?.let { userById[it] }
-            val proj = Projects(id, name, content, manager, null, slug, "")
+            val memberRole = parseMemberRoleFromProjectElement(p)
+            val proj = Projects(id, name, content, manager, null, slug, "", memberRole)
             projects.add(proj)
             projectById[id] = proj
         }
@@ -180,6 +198,9 @@ private fun parseAppInitResponse(json: String): AppData {
             val projectId = pp.optString("project_id").takeIf { it.isNotBlank() } ?: continue
             val user = userById[userId] ?: continue
             val project = projectById[projectId] ?: continue
+            if (sessionUserId != null && userId == sessionUserId) {
+                parseMemberRoleFromPermittedRow(pp)?.let { role -> project.memberRole = role }
+            }
             permittedProjects.add(PermittedProjects(id, user, project))
         }
     }

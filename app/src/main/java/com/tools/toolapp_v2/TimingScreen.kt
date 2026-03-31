@@ -1,7 +1,6 @@
 package com.tools.toolapp_v2
 
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -27,7 +26,6 @@ import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -81,8 +79,6 @@ fun TimingScreen(
     currentTimerStartMillis: Long?,
     onStartTimer: (String) -> Unit,
     onPauseTimer: () -> Unit,
-    timeEntries: List<TimeEntries>,
-    currentUser: Users,
     totalTodayFromEntries: Double,
     selectedWorkDateMillis: Long,
     onWorkDateChange: (Long) -> Unit,
@@ -90,7 +86,6 @@ fun TimingScreen(
     modifier: Modifier = Modifier
 ) {
     var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
-    var showDatePicker by remember { mutableStateOf(false) }
     LaunchedEffect(currentRunningKey) {
         if (currentRunningKey != null) {
             while (true) {
@@ -116,40 +111,11 @@ fun TimingScreen(
                 text = "Дата списания:",
                 style = MaterialTheme.typography.bodyMedium
             )
-            Button(
-                onClick = { showDatePicker = true },
+            Text(
+                text = timingDateDisplayFormat.format(Date(selectedWorkDateMillis)),
+                style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.padding(start = 8.dp)
-            ) {
-                Text(timingDateDisplayFormat.format(Date(selectedWorkDateMillis)))
-            }
-        }
-        if (showDatePicker) {
-            val datePickerState = rememberDatePickerState(
-                initialSelectedDateMillis = selectedWorkDateMillis,
-                initialDisplayedMonthMillis = selectedWorkDateMillis
             )
-            DatePickerDialog(
-                onDismissRequest = { showDatePicker = false },
-                confirmButton = {
-                    TextButton(
-                        onClick = {
-                            datePickerState.selectedDateMillis?.let { ms ->
-                                onWorkDateChange(dayStartMillis(ms))
-                            }
-                            showDatePicker = false
-                        }
-                    ) {
-                        Text("ОК")
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showDatePicker = false }) {
-                        Text("Отмена")
-                    }
-                }
-            ) {
-                DatePicker(state = datePickerState)
-            }
         }
         // Верх: строки таймеров
         Text(
@@ -175,22 +141,6 @@ fun TimingScreen(
                     onStart = { onStartTimer(row.key) },
                     onPause = onPauseTimer
                 )
-            }
-        }
-
-        // Низ: записи TimeEntries (только свои)
-        Text(
-            text = "Записи трудозатрат",
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-        )
-        LazyColumn(
-            modifier = Modifier.weight(1f),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            items(timeEntries) { entry ->
-                TimeEntryCard(entry = entry)
             }
         }
 
@@ -267,48 +217,6 @@ private fun TimingRowCard(
                     Icon(Icons.Default.PlayArrow, contentDescription = "Старт")
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun TimeEntryCard(
-    entry: TimeEntries,
-    modifier: Modifier = Modifier
-) {
-    val title = when {
-        entry.issue != null -> entry.issue!!.name
-        entry.note != null -> entry.note!!.content.take(50)
-        entry.projectLog != null -> entry.projectLog!!.content.take(50)
-        else -> "—"
-    }
-    Card(
-        modifier = modifier.fillMaxWidth(),
-        shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.bodySmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = entry.project?.name ?: "—",
-                    style = MaterialTheme.typography.labelSmall
-                )
-            }
-            Text(
-                text = "%.2f ч".format(roundTimeEntryHours(entry.hours)),
-                style = MaterialTheme.typography.bodyMedium
-            )
         }
     }
 }

@@ -1,4 +1,5 @@
--- Исправление: в таблице accounts колонка называется owner_id, а не user_id
+-- В projects из app_init добавляется member_role из project_members.role (например PM).
+
 create or replace function public.app_init()
 returns json
 language plpgsql
@@ -15,6 +16,8 @@ begin
       where up.id = auth.uid()
     ),
 
+    -- member_role: всегда из project_members.role (текст). jsonb_set гарантирует значение поверх to_jsonb(p),
+    -- иначе колонка projects.member_role (если есть) при merge || могла «перебить» правую часть в зависимости от порядка ключей.
     'projects', (
       select coalesce(
         json_agg(

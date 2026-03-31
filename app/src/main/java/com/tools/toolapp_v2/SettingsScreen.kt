@@ -40,11 +40,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.widget.Toast
 
 private sealed class AccountTreeItem {
     data class Account(val account: Accounts) : AccountTreeItem()
     data class Project(val project: Projects) : AccountTreeItem()
+    data class Company(val company: Companies) : AccountTreeItem()
 }
 
 private enum class SettingsDestination {
@@ -64,10 +70,12 @@ fun SettingsScreen(
     onGoogleAccessTokenChange: (String) -> Unit,
     onSignInGoogleForSheets: () -> Unit,
     /** Интервал регламентной загрузки (секунды). */
-    loadIntervalSeconds: Int = 30,
+    loadIntervalSeconds: Int = 300,
     onLoadIntervalChange: (Int) -> Unit = {},
-    /** Текст отладочного лога (добавляется из загрузки и др.); показывается в большом поле, т.к. алерты обрезаются. */
+    /** Текст отладочного лога (карточка проекта, выгрузка тайминга). */
     debugLogText: String = "",
+    /** Обновить поле лога после дополнения AppDebugLog (например из карточки проекта). */
+    onDebugLogRefresh: () -> Unit = {},
     onClearDebugLog: () -> Unit = {},
     /** Список пользователей для раздела «Пользователи» (ФИО и email для идентификации при загрузке). */
     allUsers: List<Users>,
@@ -176,7 +184,7 @@ fun SettingsScreen(
                 OutlinedTextField(
                     value = loadIntervalSeconds.toString(),
                     onValueChange = { s ->
-                        val v = s.filter { it.isDigit() }.toIntOrNull()?.coerceIn(5, 3600) ?: 30
+                        val v = s.filter { it.isDigit() }.toIntOrNull()?.coerceIn(100, 3600) ?: 300
                         onLoadIntervalChange(v)
                     },
                     modifier = Modifier.fillMaxWidth(),
@@ -184,7 +192,7 @@ fun SettingsScreen(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     supportingText = {
                         Text(
-                            "Периодическая загрузка заявок с интервалом (5–3600 сек). После сохранения заявки загрузка выполняется сразу, следующий запуск — через указанный интервал.",
+                            "Периодическая загрузка заявок с интервалом (100–3600 сек). После сохранения заявки загрузка выполняется сразу, следующий запуск — через указанный интервал.",
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
@@ -200,6 +208,21 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End
                 ) {
+                    val context = LocalContext.current
+                    val placeholderLog =
+                        "Пока пусто. Откройте карточку проекта (чтение адреса таблицы) или завершите день на тайминге (запись в Google)."
+                    TextButton(
+                        onClick = {
+                            val textToCopy = debugLogText.ifBlank { placeholderLog }
+                            val cm =
+                                context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            cm.setPrimaryClip(ClipData.newPlainText("Отладочный лог", textToCopy))
+                            Toast.makeText(context, "Скопировано в буфер обмена", Toast.LENGTH_SHORT)
+                                .show()
+                        }
+                    ) {
+                        Text("Копировать")
+                    }
                     TextButton(onClick = onClearDebugLog) {
                         Text("Очистить")
                     }
@@ -219,7 +242,7 @@ fun SettingsScreen(
                             .verticalScroll(scrollState)
                     ) {
                         Text(
-                            text = debugLogText.ifBlank { "Тут лог" },
+                            text = debugLogText.ifBlank { "Пока пусто. Откройте карточку проекта (чтение адреса таблицы) или завершите день на тайминге (запись в Google)." },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurface
                         )
@@ -398,10 +421,8 @@ fun SettingsScreen(
                 ProjectCardScreen(
                     project = selectedProject!!,
                     currentUser = currentUser,
-                    permittedProjects = permittedProjects,
-                    allUsers = allUsers,
-                    allAccounts = allAccounts,
                     onDismiss = { selectedProject = null },
+                    onDebugLogRefresh = onDebugLogRefresh,
                     modifier = modifier.fillMaxSize()
                 )
             } else {
@@ -428,6 +449,8 @@ fun SettingsScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         items(visibleProjects) { project ->
+                            val pmHighlight = project.isMemberRolePm()
+                            val accent = MaterialTheme.colorScheme.error
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -436,12 +459,13 @@ fun SettingsScreen(
                             ) {
                                 Text(
                                     text = project.name,
-                                    style = MaterialTheme.typography.bodyLarge
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = if (pmHighlight) accent else MaterialTheme.colorScheme.onSurface
                                 )
                                 Text(
                                     text = "GUID: ${project.id}",
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = if (pmHighlight) accent else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                         }
@@ -461,19 +485,25 @@ fun SettingsScreen(
                 ProjectCardScreen(
                     project = selectedProject!!,
                     currentUser = currentUser,
-                    permittedProjects = permittedProjects,
-                    allUsers = allUsers,
-                    allAccounts = allAccounts,
                     onDismiss = { selectedProject = null },
+                    onDebugLogRefresh = onDebugLogRefresh,
                     modifier = modifier.fillMaxSize()
                 )
             } else {
                 var expandedAccountIds by remember { mutableStateOf(setOf<String>()) }
-                val treeItems = remember(visibleAccounts, permittedProjects, expandedAccountIds) {
+                val treeItems = remember(visibleAccounts, permittedProjects, visibleCompanies, expandedAccountIds) {
                     visibleAccounts.flatMap { account ->
                         val projects = permittedProjects.filter { it.account?.id == account.id }
                         val isExpanded = account.id in expandedAccountIds
-                        listOf(AccountTreeItem.Account(account)) + if (isExpanded) projects.map { AccountTreeItem.Project(it) } else emptyList()
+                        val accountRow = listOf(AccountTreeItem.Account(account))
+                        if (!isExpanded) return@flatMap accountRow
+                        val projectRows = projects.flatMap { project ->
+                            val companiesForProject = visibleCompanies.filter { it.project?.id == project.id }
+                            val projectItem = AccountTreeItem.Project(project)
+                            val companyItems = companiesForProject.map { company -> AccountTreeItem.Company(company) }
+                            listOf(projectItem) + companyItems
+                        }
+                        accountRow + projectRows
                     }
                 }
                 Scaffold(
@@ -535,6 +565,9 @@ fun SettingsScreen(
                                 }
                                 is AccountTreeItem.Project -> {
                                     val project = row.project
+                                    val pmHighlight = project.isMemberRolePm()
+                                    val roleInProject = project.memberRole?.trim()?.takeIf { it.isNotBlank() } ?: "—"
+                                    val line = "${project.id} ${project.name} ($roleInProject)"
                                     Row(
                                         modifier = Modifier
                                             .fillMaxWidth()
@@ -543,8 +576,25 @@ fun SettingsScreen(
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Text(
-                                            text = project.name,
+                                            text = line,
                                             style = MaterialTheme.typography.bodyMedium,
+                                            color = if (pmHighlight) MaterialTheme.colorScheme.error
+                                            else MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                                is AccountTreeItem.Company -> {
+                                    val company = row.company
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable { selectedCompany = company }
+                                            .padding(start = 72.dp, top = 2.dp, bottom = 2.dp, end = 0.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = company.name,
+                                            style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                     }

@@ -70,6 +70,7 @@ private fun parseRoadMapDateFromField(s: String?): Long {
     return 0L
 }
 
+/** Форма элемента графика; открывается с вкладки «Графики». */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RoadMapFormScreen(

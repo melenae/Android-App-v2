@@ -5,6 +5,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -15,6 +16,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -32,31 +34,58 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import android.content.Context
+import android.widget.Toast
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProjectCardScreen(
     project: Projects,
     currentUser: Users,
-    permittedProjects: List<Projects>,
-    allUsers: List<Users>,
-    allAccounts: List<Accounts>,
     onDismiss: () -> Unit,
+    onDebugLogRefresh: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val prefs = remember(project.id, currentUser.id) { context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE) }
-    val projectSourceKey = "project_source_${currentUser.id}_${project.id}"
+    val appContext = context.applicationContext
+    val prefs = remember {
+        appContext.getSharedPreferences(APP_PREFS_NAME, Context.MODE_PRIVATE)
+    }
     var sourceState by remember(project.id, currentUser.id) {
-        mutableStateOf(prefs.getString(projectSourceKey, "") ?: "")
+        mutableStateOf(readProjectGoogleTableUrl(appContext, prefs, currentUser, project.id))
     }
     LaunchedEffect(project.id, currentUser.id) {
-        project.source = prefs.getString(projectSourceKey, "") ?: ""
+        val fromDisk = readProjectGoogleTableUrl(appContext, prefs, currentUser, project.id)
+        sourceState = fromDisk
+        project.source = fromDisk
+        AppDebugLog.append(
+            projectGoogleSourceReadDiagnostics(
+                appContext,
+                prefs,
+                currentUser,
+                project.id,
+                project.name,
+                fromDisk
+            )
+        )
+        onDebugLogRefresh()
+    }
+    val pmHighlight = project.isMemberRolePm()
+    val errorColor = MaterialTheme.colorScheme.error
+    val nameFieldColors = OutlinedTextFieldDefaults.colors(
+        disabledTextColor = if (pmHighlight) errorColor else MaterialTheme.colorScheme.onSurface,
+        disabledBorderColor = if (pmHighlight) errorColor else MaterialTheme.colorScheme.outline,
+        disabledLabelColor = if (pmHighlight) errorColor else MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    val managerDisplayName = when {
+        project.manager != null -> project.manager!!.displayName
+        pmHighlight -> currentUser.displayName
+        else -> "Не выбрано"
     }
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -84,159 +113,117 @@ fun ProjectCardScreen(
             Text(
                 text = "GUID: ${project.id}",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = if (pmHighlight) errorColor else MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(modifier = Modifier.height(12.dp))
 
             OutlinedTextField(
                 value = project.name,
-                onValueChange = { project.name = it },
-                label = { Text("Наименование") },
+                onValueChange = {},
+                readOnly = true,
+                enabled = false,
+                label = { Text("Проект") },
                 modifier = Modifier.fillMaxWidth(),
-                singleLine = true
+                singleLine = true,
+                colors = nameFieldColors
             )
             Spacer(modifier = Modifier.height(12.dp))
 
             OutlinedTextField(
                 value = project.content,
-                onValueChange = { project.content = it },
+                onValueChange = {},
+                readOnly = true,
+                enabled = false,
                 label = { Text("Описание") },
                 modifier = Modifier.fillMaxWidth(),
                 minLines = 2,
-                maxLines = 4
+                maxLines = 4,
+                colors = OutlinedTextFieldDefaults.colors(
+                    disabledTextColor = MaterialTheme.colorScheme.onSurface,
+                    disabledBorderColor = MaterialTheme.colorScheme.outline,
+                    disabledLabelColor = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             )
-            Spacer(modifier = Modifier.height(12.dp))
-
-            var managerDialogOpen by remember { mutableStateOf(false) }
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clipToBounds()
-                    .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {
-                        managerDialogOpen = true
-                    }
-            ) {
-                OutlinedTextField(
-                    value = project.manager?.displayName ?: "Не выбрано",
-                    onValueChange = {},
-                    readOnly = true,
-                    enabled = false,
-                    label = { Text("Руководитель") },
-                    trailingIcon = { Icon(Icons.Default.ArrowDropDown, contentDescription = null) },
-                    colors = OutlinedTextFieldDefaults.colors(
-                        disabledTextColor = MaterialTheme.colorScheme.onSurface,
-                        disabledBorderColor = MaterialTheme.colorScheme.outline,
-                        disabledTrailingIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                        disabledLabelColor = MaterialTheme.colorScheme.onSurfaceVariant
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-            if (managerDialogOpen) {
-                AlertDialog(
-                    onDismissRequest = { managerDialogOpen = false },
-                    title = { Text("Руководитель") },
-                    text = {
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(
-                                text = "Не выбрано",
-                                style = MaterialTheme.typography.bodyLarge,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { project.manager = null; managerDialogOpen = false }
-                                    .padding(vertical = 12.dp)
-                            )
-                            allUsers.forEach { user ->
-                                Text(
-                                    text = user.displayName,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { project.manager = user; managerDialogOpen = false }
-                                        .padding(vertical = 12.dp)
-                                )
-                            }
-                        }
-                    },
-                    confirmButton = {
-                        TextButton(onClick = { managerDialogOpen = false }) { Text("Отмена") }
-                    }
-                )
-            }
-            Spacer(modifier = Modifier.height(12.dp))
-
-            var accountDialogOpen by remember { mutableStateOf(false) }
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clipToBounds()
-                    .clickable(indication = null, interactionSource = remember { MutableInteractionSource() }) {
-                        accountDialogOpen = true
-                    }
-            ) {
-                OutlinedTextField(
-                    value = project.account?.name ?: "Не выбрано",
-                    onValueChange = {},
-                    readOnly = true,
-                    enabled = false,
-                    label = { Text("Счёт") },
-                    trailingIcon = { Icon(Icons.Default.ArrowDropDown, contentDescription = null) },
-                    colors = OutlinedTextFieldDefaults.colors(
-                        disabledTextColor = MaterialTheme.colorScheme.onSurface,
-                        disabledBorderColor = MaterialTheme.colorScheme.outline,
-                        disabledTrailingIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                        disabledLabelColor = MaterialTheme.colorScheme.onSurfaceVariant
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
             Spacer(modifier = Modifier.height(12.dp))
 
             OutlinedTextField(
-                value = sourceState,
-                onValueChange = {
-                    sourceState = it
-                    project.source = it
-                    prefs.edit().putString(projectSourceKey, it).apply()
-                },
-                label = { Text("Адрес таблицы Google (данные проекта)") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                placeholder = { Text("https://docs.google.com/spreadsheets/d/...") }
+                value = managerDisplayName,
+                onValueChange = {},
+                readOnly = true,
+                enabled = false,
+                label = { Text("Руководитель проекта") },
+                colors = OutlinedTextFieldDefaults.colors(
+                    disabledTextColor = MaterialTheme.colorScheme.onSurface,
+                    disabledBorderColor = MaterialTheme.colorScheme.outline,
+                    disabledLabelColor = MaterialTheme.colorScheme.onSurfaceVariant
+                ),
+                modifier = Modifier.fillMaxWidth()
             )
             Spacer(modifier = Modifier.height(12.dp))
 
-            if (accountDialogOpen) {
-                AlertDialog(
-                    onDismissRequest = { accountDialogOpen = false },
-                    title = { Text("Счёт") },
-                    text = {
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(
-                                text = "Не выбрано",
-                                style = MaterialTheme.typography.bodyLarge,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { project.account = null; accountDialogOpen = false }
-                                    .padding(vertical = 12.dp)
-                            )
-                            allAccounts.forEach { account ->
-                                Text(
-                                    text = account.name,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { project.account = account; accountDialogOpen = false }
-                                        .padding(vertical = 12.dp)
-                                )
-                            }
-                        }
-                    },
-                    confirmButton = {
-                        TextButton(onClick = { accountDialogOpen = false }) { Text("Отмена") }
-                    }
+            OutlinedTextField(
+                value = project.account?.name ?: "Не выбрано",
+                onValueChange = {},
+                readOnly = true,
+                enabled = false,
+                label = { Text("Счёт") },
+                colors = OutlinedTextFieldDefaults.colors(
+                    disabledTextColor = MaterialTheme.colorScheme.onSurface,
+                    disabledBorderColor = MaterialTheme.colorScheme.outline,
+                    disabledLabelColor = MaterialTheme.colorScheme.onSurfaceVariant
+                ),
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = sourceState,
+                    onValueChange = { sourceState = it },
+                    label = { Text("Адрес таблицы Google (данные проекта)") },
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                    placeholder = { Text("https://docs.google.com/spreadsheets/d/...") }
                 )
+                IconButton(
+                    onClick = {
+                        val trimmed = sourceState.trim()
+                        val ok = writeProjectGoogleTableUrl(appContext, prefs, currentUser, project.id, trimmed)
+                        if (ok) {
+                            project.source = trimmed
+                            AppDebugLog.append(
+                                "Сохранён локально адрес таблицы (проект «${project.name}»).\n" +
+                                    "Ключ prefs: ${projectGoogleSourcePrefsKey(currentUser, project.id)}\n" +
+                                    "Значение: $trimmed"
+                            )
+                            onDebugLogRefresh()
+                            Toast.makeText(context, "Адрес таблицы сохранён", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(
+                                context,
+                                "Не удалось записать настройки на диск",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Save,
+                        contentDescription = "Сохранить адрес таблицы"
+                    )
+                }
             }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "Хранится только на этом устройстве (файл настроек приложения, не app_init). " +
+                    "После сохранения адрес подставляется в карточку проекта при следующем открытии.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(12.dp))
         }
     }
 }
@@ -456,9 +443,12 @@ fun CompanyCardScreen(
                                     .padding(vertical = 12.dp)
                             )
                             permittedProjects.forEach { project ->
+                                val pmHighlight = project.isMemberRolePm()
                                 Text(
                                     text = project.name,
                                     style = MaterialTheme.typography.bodyLarge,
+                                    color = if (pmHighlight) MaterialTheme.colorScheme.error
+                                    else MaterialTheme.colorScheme.onSurface,
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .clickable { company.project = project; projectDialogOpen = false }

@@ -13,7 +13,8 @@ import java.util.Locale
 /**
  * Загрузка данных из Google Таблиц (Google Sheets).
  * Таблица должна быть доступна по ссылке («Настройки доступа» → «Все, у кого есть ссылка»).
- * Читается лист Issues (по умолчанию первый лист, gid=0).
+ * Читается лист Issues: при доступе по API — сначала лист с названием «Issues» (как notes/roadMaps),
+ * иначе gid из ссылки или первый лист (gid=0). Ссылка с #gid=… на другой лист (например roadMaps) больше не подменяет заявки.
  */
 
 /** Извлекает ID таблицы из ссылки вида https://docs.google.com/spreadsheets/d/ID/edit... */
@@ -151,8 +152,13 @@ fun loadIssuesFromGoogleSheets(
 ): GoogleSheetsLoadResult {
     val spreadsheetId = extractGoogleSpreadsheetId(url)
         ?: return GoogleSheetsLoadResult(emptyList(), "Неверная ссылка на Google Таблицу")
-    val gid = extractGoogleSheetGid(url) ?: 0
     val token = accessToken?.trim()?.takeIf { it.isNotEmpty() }
+    val gidFromUrl = extractGoogleSheetGid(url) ?: 0
+    val gid = if (token != null) {
+        getGoogleSheetGidByTitle(spreadsheetId, "Issues", token) ?: gidFromUrl
+    } else {
+        gidFromUrl
+    }
     val csv = if (token != null) {
         fetchGoogleSheetValuesViaApi(spreadsheetId, gid, token)
     } else {
@@ -223,7 +229,7 @@ fun loadIssuesFromGoogleSheets(
                     roadMapsCsv == null -> emptyList<RoadMap>() to "Лист «roadMaps» найден, но не удалось прочитать данные."
                     roadMapsCsv.isBlank() -> emptyList<RoadMap>() to "Таблица roadMaps прочитана: 0 записей (лист пуст)."
                     else -> {
-                        val list = loadRoadMapsFromCsv(roadMapsCsv, users, projects, currentUser)
+                        val list = loadRoadMapsFromCsv(roadMapsCsv, users, projects, onDebugLog, currentUser)
                         list to "Таблица roadMaps прочитана: ${list.size} записей."
                     }
                 }
@@ -289,6 +295,14 @@ private fun sheetsGet(spreadsheetId: String, accessToken: String, subPath: Strin
 }
 
 private fun sheetsPut(spreadsheetId: String, accessToken: String, range: String, values: List<Any?>): Boolean {
+    return sheetsPutError(spreadsheetId, accessToken, range, values) == null
+}
+
+/**
+ * Пишет одну строку в диапазон и возвращает текст ошибки (null при успехе).
+ * Ошибка включает HTTP-код и тело ответа Google API для диагностики.
+ */
+private fun sheetsPutError(spreadsheetId: String, accessToken: String, range: String, values: List<Any?>): String? {
     return try {
         val encodedRange = URLEncoder.encode(range, "UTF-8")
         val url = URL("$SHEETS_API_BASE/$spreadsheetId/values/$encodedRange?valueInputOption=USER_ENTERED")
@@ -304,9 +318,19 @@ private fun sheetsPut(spreadsheetId: String, accessToken: String, range: String,
             put("values", JSONArray().put(JSONArray().apply { values.forEach { put(it) } }))
         }
         OutputStreamWriter(conn.outputStream).use { it.write(body.toString()) }
-        conn.responseCode in 200..299
-    } catch (_: Exception) {
-        false
+        if (conn.responseCode in 200..299) {
+            null
+        } else {
+            val errBody = try {
+                conn.errorStream?.bufferedReader()?.use { it.readText() }?.trim().orEmpty()
+            } catch (_: Exception) {
+                ""
+            }
+            val suffix = if (errBody.isNotBlank()) " | body=$errBody" else ""
+            "HTTP ${conn.responseCode}${suffix}"
+        }
+    } catch (e: Exception) {
+        e.message ?: "Неизвестная ошибка запроса"
     }
 }
 
@@ -482,8 +506,9 @@ private fun getNextIssueIdAndLastFilledRow(
 }
 
 /**
- * Ищет номер строки (1-based) по id заявки в колонке A и при необходимости по проекту (колонка I).
- * Запрашивает A2:K1000; при неудаче — A2:A500 (по id).
+ * Ищет номер строки (1-based) по id заявки в колонке A и project_id в колонке H.
+ * (Колонка I — company; ранее ошибочно читали project из I, из-за чего строка не находилась и создавалась новая.)
+ * Запрашивает A2:I1000; при неудаче — A2:A500 (по id).
  */
 private fun findGoogleSheetRowById(
     spreadsheetId: String,
@@ -501,15 +526,16 @@ private fun findGoogleSheetRowById(
         } catch (_: Exception) { null }
     }
     val sheetId = issueIdToSheetId(issueId)
-    val rows = fetchRange("A2:K1000") ?: fetchRange("A2:A500")
+    val rows = fetchRange("A2:I1000") ?: fetchRange("A2:A500")
     if (rows == null || rows.length() == 0) return null
     return try {
         for (i in 0 until rows.length()) {
             val row = rows.optJSONArray(i) ?: continue
             val colA = row.optString(0, "").trim()
             if (colA != sheetId) continue
-            val colProject = if (row.length() > 8) row.optString(8, "").trim() else ""
-            val projectOk = projectId.isNullOrBlank() || colProject == projectId || colProject.isEmpty()
+            // H = project id (0-based index 7); I = company
+            val colProject = if (row.length() > 7) row.optString(7, "").trim() else ""
+            val projectOk = projectId.isNullOrBlank() || colProject == projectId
             if (projectOk) return 2 + i
         }
         null
@@ -545,7 +571,11 @@ private fun ensureGoogleSheetExists(spreadsheetId: String, accessToken: String, 
     }
 }
 
-/** Строка листа notes без колонки id (B–M): done, Описание, User, applicant, Проект, project, company, dateUpdate, onTiming, source_type, source, roadMap. Колонка A (id) при записи не меняется. */
+/** Строка листа notes без колонки id (B–K): done, content, User, applicant, Проект, project, company, dateUpdate, onTiming, roadMap. Колонка A (id) при записи не меняется. */
+private val dateUpdateSheetFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+private fun formatDateUpdateForSheet(ms: Long): Any? =
+    if (ms > 0L) dateUpdateSheetFormat.format(Date(ms)) else ""
+
 private fun noteRowValuesWithoutId(note: Notes): List<Any?> = listOf(
     note.done,
     note.content,
@@ -553,18 +583,19 @@ private fun noteRowValuesWithoutId(note: Notes): List<Any?> = listOf(
     userDisplayForSheet(note.applicant),
     note.project?.name ?: "",
     note.project?.id ?: "",
-    note.company?.id?.toString() ?: "",
-    (if (note.dateUpdate > 0L) note.dateUpdate.toDouble() else ""),
-    if (note.onTiming) "TRUE" else "FALSE",
-    note.source_type,
-    note.source,
+    note.company?.name ?: "",
+    formatDateUpdateForSheet(note.dateUpdate),
+    if (note.onTiming) "True" else "False",
     note.roadMap?.id ?: ""
 )
 
 private val projectLogDateSheetFormat = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
 
 /** Строка листа projectLogs: A=id, B=type, C=date, D=content, ..., roadMap. */
-private fun projectLogRowValues(log: ProjectLogs): List<Any?> = listOf(
+private fun projectLogRowValues(log: ProjectLogs, companies: List<Companies>): List<Any?> {
+    // company (колонка 11) — наименование компании из самой записи журнала
+    val companyName = log.company?.name ?: ""
+    return listOf(
     log.id,
     log.type,
     if (log.date > 0L) projectLogDateSheetFormat.format(Date(log.date)) else "",
@@ -575,25 +606,33 @@ private fun projectLogRowValues(log: ProjectLogs): List<Any?> = listOf(
     userDisplayForSheet(log.applicant),
     log.project?.name ?: "",
     log.project?.id ?: "",
-    "",  // company (в модели ProjectLogs нет)
-    "",  // dateUpdate (в модели ProjectLogs нет)
-    if (log.onTiming) "ИСТИНА" else "ЛОЖЬ",
-    log.source_type,
-    log.source,
+    companyName, // company (колонка 11)
+    // dateUpdate (12-я колонка): фиксируем момент выгрузки (текущее время)
+    formatDateUpdateForSheet(System.currentTimeMillis()),
+    if (log.onTiming) "True" else "False",
     log.roadMap?.id ?: ""
 )
+}
 
-/** Ищет номер строки (1-based) на листе projectLogs по id в колонке A. */
-private fun findProjectLogRowById(spreadsheetId: String, accessToken: String, logId: String): Int? {
+/** Ищет номер строки (1-based) на листе projectLogs по id (A) и project_id (J). */
+private fun findProjectLogRowByIdAndProject(
+    spreadsheetId: String,
+    accessToken: String,
+    logId: String,
+    projectId: String?
+): Int? {
     val sheetName = "projectLogs"
-    val range = "'${sheetName.replace("'", "''")}'!A2:A500"
+    val range = "'${sheetName.replace("'", "''")}'!A2:J5000"
     val json = sheetsGet(spreadsheetId, accessToken, "/values/${URLEncoder.encode(range, "UTF-8")}") ?: return null
     return try {
         val rows = JSONObject(json).optJSONArray("values") ?: return null
+        val projectIdStr = projectId?.trim().orEmpty()
         for (i in 0 until rows.length()) {
             val row = rows.optJSONArray(i) ?: continue
             val colA = row.optString(0, "").trim()
-            if (colA == logId) return 2 + i
+            // A=id, J=project (id проекта)
+            val colJ = row.optString(9, "").trim()
+            if (colA == logId.trim() && colJ == projectIdStr) return 2 + i
         }
         null
     } catch (_: Exception) {
@@ -606,16 +645,21 @@ private fun findProjectLogRowById(spreadsheetId: String, accessToken: String, lo
  * Если запись с таким id есть — обновляется только её строка; иначе добавляется новая строка в конец.
  * @return true при успешной записи
  */
-fun writeSingleProjectLogToGoogleSheet(spreadsheetId: String, accessToken: String, log: ProjectLogs): Boolean {
+fun writeSingleProjectLogToGoogleSheet(
+    spreadsheetId: String,
+    accessToken: String,
+    log: ProjectLogs,
+    companies: List<Companies> = emptyList()
+): Boolean {
     if (!ensureGoogleSheetExists(spreadsheetId, accessToken, "projectLogs")) return false
     val token = accessToken.trim()
-    val row1Based = findProjectLogRowById(spreadsheetId, token, log.id)
-    val values = projectLogRowValues(log)
+    val row1Based = findProjectLogRowByIdAndProject(spreadsheetId, token, log.id, log.project?.id)
+    val values = projectLogRowValues(log, companies)
     return if (row1Based != null) {
-        val range = "'projectLogs'!A$row1Based:O$row1Based"
+        val range = "'projectLogs'!A$row1Based:N$row1Based"
         sheetsPutRange(spreadsheetId, token, range, listOf(values))
     } else {
-        sheetsAppendRange(spreadsheetId, token, "'projectLogs'!A:P", listOf(values))
+        sheetsAppendRange(spreadsheetId, token, "'projectLogs'!A:N", listOf(values))
     }
 }
 
@@ -647,11 +691,16 @@ private fun sheetsAppendRange(spreadsheetId: String, accessToken: String, range:
 /**
  * Записывает все записи журнала на лист «projectLogs» (полная перезапись). Используется при первой выгрузке.
  */
-fun writeProjectLogsToGoogleSheet(spreadsheetId: String, accessToken: String, logs: List<ProjectLogs>): Boolean {
+fun writeProjectLogsToGoogleSheet(
+    spreadsheetId: String,
+    accessToken: String,
+    logs: List<ProjectLogs>,
+    companies: List<Companies> = emptyList()
+): Boolean {
     if (!ensureGoogleSheetExists(spreadsheetId, accessToken, "projectLogs")) return false
-    val header = listOf<Any?>("id", "type", "date", "content", "agenda", "resolution", "user", "applicant", "Проект", "project", "company", "dateUpdate", "onTiming", "source_type", "source", "roadMap")
-    val rows = listOf(header) + logs.map { projectLogRowValues(it) }
-    val range = "'projectLogs'!A1:P${rows.size}"
+    val header = listOf<Any?>("id", "type", "date", "content", "agenda", "resolution", "user", "applicant", "Проект", "project", "company", "dateUpdate", "onTiming", "roadMap")
+    val rows = listOf(header) + logs.map { projectLogRowValues(it, companies) }
+    val range = "'projectLogs'!A1:N${rows.size}"
     return sheetsPutRange(spreadsheetId, accessToken.trim(), range, rows)
 }
 
@@ -691,25 +740,30 @@ private fun timeEntryRowValues(entry: TimeEntries): List<Any?> = listOf(
 )
 
 /**
- * Записывает все записи тайминга на лист «timeEntries» (полная перезапись).
+ * Добавляет записи тайминга на лист «timeEntries» (append, без полной перезаписи).
  * Вызывается при нажатии «Завершить день» на закладке Тайминг.
  * Колонка date — дата списания (к которой относятся трудозатраты). noteName = content.
  */
 fun writeTimeEntriesToGoogleSheet(spreadsheetId: String, accessToken: String, entries: List<TimeEntries>): Boolean {
     if (!ensureGoogleSheetExists(spreadsheetId, accessToken, "timeEntries")) return false
+    if (entries.isEmpty()) return true
+    val token = accessToken.trim()
     val header = listOf<Any?>(
         "id", "issueID", "issueName", "noteID", "noteName", "projectLogID", "projectLogName",
         "roadMapID", "roadMapName", "user", "hours", "date", "createdOn", "updatedOn", "project", "comment"
     )
-    val rows = listOf(header) + entries.map { timeEntryRowValues(it) }
-    val range = "'timeEntries'!A1:P${rows.size}"
-    return sheetsPutRange(spreadsheetId, accessToken.trim(), range, rows)
+    // Заголовок поддерживаем всегда, но данные добавляем только append (важно для конкурентных устройств).
+    if (!sheetsPutRange(spreadsheetId, token, "'timeEntries'!A1:P1", listOf(header))) return false
+    val rows = entries.map { timeEntryRowValues(it) }
+    return sheetsAppendRange(spreadsheetId, token, "'timeEntries'!A:P", rows)
 }
 
 private val roadMapDateSheetFormat = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
 
-/** Строка листа roadMaps: A=id, B=Название, C=Описание, D=step, E=start, F=end, G=User, H=Проект, I=project, J=dateUpdate, K=onTiming, L=source_type, M=source. */
-private fun roadMapRowValues(roadMap: RoadMap): List<Any?> = listOf(
+/** Строка листа roadMaps: A=id, B=Название, C=Описание, D=step, E=start, F=end, G=User, H=Проект, I=project, J=company, K=dateUpdate, L=onTiming. */
+private fun roadMapRowValues(roadMap: RoadMap, companies: List<Companies>): List<Any?> {
+    val companyId = companies.firstOrNull { it.project?.id == roadMap.project?.id }?.id?.toString() ?: ""
+    return listOf(
     roadMap.id,
     roadMap.name,
     roadMap.content,
@@ -719,24 +773,32 @@ private fun roadMapRowValues(roadMap: RoadMap): List<Any?> = listOf(
     userDisplayForSheet(roadMap.user),
     roadMap.project?.name ?: "",
     roadMap.project?.id ?: "",
-    (if (roadMap.dateUpdate > 0L) roadMap.dateUpdate.toDouble() else ""),
-    if (roadMap.onTiming) "TRUE" else "FALSE",
-    roadMap.source_type,
-    roadMap.source
+    companyId, // company (новая колонка 10)
+    formatDateUpdateForSheet(roadMap.dateUpdate),
+    if (roadMap.onTiming) "True" else "False"
 )
+}
 
-/** Ищет номер строки (1-based) на листе roadMaps по id в колонке A. */
-private fun findRoadMapRowById(spreadsheetId: String, accessToken: String, roadMapId: String): Int? {
+/** Ищет номер строки (1-based) на листе roadMaps по id (A) и project_id (I). */
+private fun findRoadMapRowByIdAndProject(
+    spreadsheetId: String,
+    accessToken: String,
+    roadMapId: String,
+    projectId: String?
+): Int? {
     val sheetName = "roadMaps"
-    val range = "'${sheetName.replace("'", "''")}'!A2:A500"
+    val range = "'${sheetName.replace("'", "''")}'!A2:I5000"
     val json = sheetsGet(spreadsheetId, accessToken, "/values/${URLEncoder.encode(range, "UTF-8")}") ?: return null
     return try {
         val rows = JSONObject(json).optJSONArray("values") ?: return null
         val idStr = roadMapId.trim()
+        val projectIdStr = projectId?.trim().orEmpty()
         for (i in 0 until rows.length()) {
             val row = rows.optJSONArray(i) ?: continue
             val colA = row.optString(0, "").trim()
-            if (colA == idStr) return 2 + i
+            // A=id, I=project (id проекта)
+            val colI = row.optString(8, "").trim()
+            if (colA == idStr && colI == projectIdStr) return 2 + i
         }
         null
     } catch (_: Exception) {
@@ -748,48 +810,129 @@ private fun findRoadMapRowById(spreadsheetId: String, accessToken: String, roadM
  * Обновляет или добавляет один элемент дорожной карты на лист «roadMaps».
  * Если запись с таким id есть — обновляется только её строка; иначе добавляется новая строка в конец.
  */
-fun writeSingleRoadMapToGoogleSheet(spreadsheetId: String, accessToken: String, roadMap: RoadMap): Boolean {
+fun writeSingleRoadMapToGoogleSheet(
+    spreadsheetId: String,
+    accessToken: String,
+    roadMap: RoadMap,
+    companies: List<Companies> = emptyList()
+): Boolean {
     if (!ensureGoogleSheetExists(spreadsheetId, accessToken, "roadMaps")) return false
     val token = accessToken.trim()
-    val row1Based = findRoadMapRowById(spreadsheetId, token, roadMap.id)
-    val values = roadMapRowValues(roadMap)
+    val roadMapsHeader = listOf<Any?>(
+        "id", "name", "content", "step", "start", "end", "User",
+        "Проект", "project", "company", "dateUpdate", "onTiming"
+    )
+    if (!sheetsPutRange(spreadsheetId, token, "'roadMaps'!A1:L1", listOf(roadMapsHeader))) return false
+    val row1Based = findRoadMapRowByIdAndProject(spreadsheetId, token, roadMap.id, roadMap.project?.id)
+    val values = roadMapRowValues(roadMap, companies)
     return if (row1Based != null) {
-        val range = "'roadMaps'!A$row1Based:M$row1Based"
+        val range = "'roadMaps'!A$row1Based:L$row1Based"
         sheetsPutRange(spreadsheetId, token, range, listOf(values))
     } else {
-        sheetsAppendRange(spreadsheetId, token, "'roadMaps'!A:M", listOf(values))
+        sheetsAppendRange(spreadsheetId, token, "'roadMaps'!A:L", listOf(values))
     }
 }
 
+private fun companyKey(company: Companies): String {
+    val projectId = company.project?.id?.trim().orEmpty()
+    val name = company.name.trim().lowercase()
+    return "$projectId|$name"
+}
+
+fun collectUnifiedCompanies(
+    baseCompanies: List<Companies>,
+    issues: List<Issues>,
+    notes: List<Notes>,
+    projectLogs: List<ProjectLogs> = emptyList(),
+    roadMaps: List<RoadMap> = emptyList()
+): List<Companies> {
+    val map = LinkedHashMap<String, Companies>()
+    baseCompanies.forEach { c -> map.putIfAbsent(companyKey(c), c) }
+    issues.mapNotNull { it.company }.forEach { c -> map.putIfAbsent(companyKey(c), c) }
+    notes.mapNotNull { it.company }.forEach { c -> map.putIfAbsent(companyKey(c), c) }
+    // Для журнала и графиков компания не хранится как отдельный реквизит в модели:
+    // добавляем компанию проекта (если она есть в справочнике).
+    projectLogs
+        .mapNotNull { log -> baseCompanies.firstOrNull { it.project?.id == log.project?.id } }
+        .forEach { c -> map.putIfAbsent(companyKey(c), c) }
+    roadMaps
+        .mapNotNull { rm -> baseCompanies.firstOrNull { it.project?.id == rm.project?.id } }
+        .forEach { c -> map.putIfAbsent(companyKey(c), c) }
+    return map.values.toList()
+}
+
+fun writeCompaniesToGoogleSheet(
+    spreadsheetId: String,
+    accessToken: String,
+    companies: List<Companies>
+): Boolean {
+    // Синхронизацию листа Companies с гугл-таблицей больше не выполняем.
+    // Функция оставлена для совместимости, но ничего не делает и всегда возвращает true.
+    return true
+}
+
 /** Заголовок листа notes (B–M), чтобы при загрузке читалась в т.ч. колонка roadMap. */
-private val notesHeaderWithoutId = listOf<Any?>("done", "Описание", "User", "applicant", "Проект", "project", "company", "dateUpdate", "onTiming", "source_type", "source", "roadMap")
+private val notesHeaderWithoutId = listOf<Any?>("done", "content", "User", "applicant", "Проект", "project", "company", "dateUpdate", "onTiming", "roadMap")
+private val notesHeaderWithId = listOf<Any?>("id") + notesHeaderWithoutId
+
+private fun noteRowValuesWithId(note: Notes): List<Any?> = listOf(note.id) + noteRowValuesWithoutId(note)
+
+/** Ищет номер строки (1-based) на листе notes по id (A) и projectId (G). */
+private fun findNoteRowByIdAndProject(
+    spreadsheetId: String,
+    accessToken: String,
+    noteId: String,
+    projectId: String?
+): Int? {
+    val sheetName = "notes"
+    val range = "'${sheetName.replace("'", "''")}'!A2:G5000"
+    val json = sheetsGet(spreadsheetId, accessToken, "/values/${URLEncoder.encode(range, "UTF-8")}") ?: return null
+    return try {
+        val rows = JSONObject(json).optJSONArray("values") ?: return null
+        val idStr = noteId.trim()
+        val projectIdStr = projectId?.trim().orEmpty()
+        for (i in 0 until rows.length()) {
+            val row = rows.optJSONArray(i) ?: continue
+            val colA = row.optString(0, "").trim()
+            // A=id, G=project (id проекта) для листа notes
+            val colG = row.optString(6, "").trim()
+            if (colA == idStr && colG == projectIdStr) return 2 + i
+        }
+        null
+    } catch (_: Exception) {
+        null
+    }
+}
 
 /**
  * Обновляет одну строку заметки на листе «notes». Колонка A (id) не трогается.
- * Сначала при необходимости записывает заголовок (B1:M1) с колонкой roadMap, чтобы при следующей загрузке roadMap не терялся.
  * Строка: id=1 → строка 2, id=2 → строка 3 и т.д. (sheetRow1Based = id.toInt() + 1).
  * @return true при успешной записи
  */
 fun writeSingleNoteToGoogleSheet(spreadsheetId: String, accessToken: String, note: Notes): Boolean {
-    val row1Based = note.id.toIntOrNull()?.plus(1) ?: return false
-    if (row1Based < 2) return false
+    if (note.id.isBlank()) return false
     if (!ensureGoogleSheetExists(spreadsheetId, accessToken, "notes")) return false
     val token = accessToken.trim()
-    if (!sheetsPutRange(spreadsheetId, token, "'notes'!B1:M1", listOf(notesHeaderWithoutId))) return false
-    val rowValues = listOf(noteRowValuesWithoutId(note))
-    val range = "'notes'!B$row1Based:M$row1Based"
-    return sheetsPutRange(spreadsheetId, token, range, rowValues)
+    val row1Based = findNoteRowByIdAndProject(spreadsheetId, token, note.id, note.project?.id)
+    return if (row1Based != null) {
+        val rowValues = listOf(noteRowValuesWithoutId(note))
+        val range = "'notes'!B$row1Based:K$row1Based"
+        sheetsPutRange(spreadsheetId, token, range, rowValues)
+    } else {
+        sheetsAppendRange(spreadsheetId, token, "'notes'!A:K", listOf(noteRowValuesWithId(note)))
+    }
 }
 
 /**
- * Записывает все заметки на лист «notes» (полная перезапись данных B–M).
+ * Записывает все заметки на лист «notes» (полная перезапись данных B–K, начиная со 2-й строки; заголовок в строке 1 не трогаем).
  * Используется при добавлении новой заметки или при первой выгрузке.
  */
 fun writeNotesToGoogleSheet(spreadsheetId: String, accessToken: String, notes: List<Notes>): Boolean {
     if (!ensureGoogleSheetExists(spreadsheetId, accessToken, "notes")) return false
     val sortedNotes = notes.sortedBy { it.id.toIntOrNull() ?: Int.MAX_VALUE }
-    val rows = listOf(notesHeaderWithoutId) + sortedNotes.map { noteRowValuesWithoutId(it) }
-    val range = "'notes'!B1:M${rows.size}"
+    // Пишем только данные, начиная со 2-й строки (B2), чтобы не изменять заголовки
+    val rows = sortedNotes.map { noteRowValuesWithoutId(it) }
+    val range = "'notes'!B2:K${rows.size + 1}"
     return sheetsPutRange(spreadsheetId, accessToken.trim(), range, rows)
 }
 
@@ -804,13 +947,11 @@ private fun issueRowValues(issue: Issues, allIssues: List<Issues>): List<Any?> {
         userDisplayForSheet(issue.applicant),
         issue.project?.name ?: "",
         issue.project?.id ?: "",
-        issue.company?.id?.toString() ?: "",
-        issue.dateUpdate.toDouble(),
-        if (issue.onTiming) "ИСТИНА" else "ЛОЖЬ",
-        if (issue.newCommentForUser) "ИСТИНА" else "ЛОЖЬ",
-        if (issue.newCommentForApplicant) "ИСТИНА" else "ЛОЖЬ",
-        issue.source_type,
-        issue.source,
+        issue.company?.name ?: "",
+        formatDateUpdateForSheet(issue.dateUpdate),
+        if (issue.onTiming) "True" else "False",
+        if (issue.newCommentForUser) "True" else "False",
+        if (issue.newCommentForApplicant) "True" else "False",
         issue.roadMap?.id ?: ""
     )
 }
@@ -839,15 +980,9 @@ fun updateIssueInGoogleSheet(
     val gidFromUrl = extractGoogleSheetGid(tableUrl) ?: 0
     val token = accessToken.trim()
     if (token.isBlank()) return GoogleSheetUpdateResult(null, "Не указан токен доступа Google")
-    var sheetName = getGoogleSheetNameByGid(spreadsheetId, gidFromUrl, token)
-    var gid = gidFromUrl
-    if (sheetName == null && gidFromUrl == 0) {
-        val issuesGid = getGoogleSheetGidByTitle(spreadsheetId, "Issues", token)
-        if (issuesGid != null) {
-            sheetName = getGoogleSheetNameByGid(spreadsheetId, issuesGid, token) ?: "Issues"
-            gid = issuesGid
-        }
-    }
+    val issuesGid = getGoogleSheetGidByTitle(spreadsheetId, "Issues", token) ?: gidFromUrl
+    var gid = issuesGid
+    var sheetName = getGoogleSheetNameByGid(spreadsheetId, issuesGid, token)
     if (sheetName == null) return GoogleSheetUpdateResult(null, "Не удалось получить имя листа (проверьте ссылку и лист Issues)")
     var row = findGoogleSheetRowById(
         spreadsheetId, sheetName,
@@ -862,9 +997,14 @@ fun updateIssueInGoogleSheet(
         val nextRow = lastFilledRow + 1
         issueToWrite = updatedIssue.copy(id = "legacy-$nextId")
         val values = issueRowValues(issueToWrite, allIssues)
-        val rangeWithSheet = "'${sheetName.replace("'", "''")}'!A$nextRow:O$nextRow"
-        if (!sheetsPut(spreadsheetId, token, rangeWithSheet, values))
-            return GoogleSheetUpdateResult(null, "Ошибка записи строки в таблицу", null)
+        val rangeWithSheet = "'${sheetName.replace("'", "''")}'!A$nextRow:N$nextRow"
+        val putError = sheetsPutError(spreadsheetId, token, rangeWithSheet, values)
+        if (putError != null)
+            return GoogleSheetUpdateResult(
+                null,
+                "Ошибка записи строки в таблицу ($rangeWithSheet): $putError",
+                null
+            )
         row = nextRow
         val noteText = formatCommentsAsNote(commentsForIssue)
         if (noteText.isNotBlank()) sheetsSetCellNote(spreadsheetId, token, gid, row, noteText)
@@ -872,10 +1012,15 @@ fun updateIssueInGoogleSheet(
     }
     issueToWrite = updatedIssue
     val values = issueRowValues(issueToWrite, allIssues)
-    val rangeWithSheet = "'${sheetName.replace("'", "''")}'!A$row:P$row"
-    if (!sheetsPut(spreadsheetId, token, rangeWithSheet, values))
-        return GoogleSheetUpdateResult(null, "Ошибка записи в Google Таблицу")
+    val rangeWithSheet = "'${sheetName.replace("'", "''")}'!A$row:N$row"
+    val putError = sheetsPutError(spreadsheetId, token, rangeWithSheet, values)
+    if (putError != null)
+        return GoogleSheetUpdateResult(
+            null,
+            "Ошибка записи в Google Таблицу ($rangeWithSheet): $putError"
+        )
     val noteText = formatCommentsAsNote(commentsForIssue)
     if (noteText.isNotBlank()) sheetsSetCellNote(spreadsheetId, token, gid, row, noteText)
     return GoogleSheetUpdateResult(row, null, null)
 }
+

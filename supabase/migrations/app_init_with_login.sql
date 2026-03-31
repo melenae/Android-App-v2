@@ -15,7 +15,17 @@ begin
       where up.id = auth.uid()
     ),
     'projects', (
-      select coalesce(json_agg(p), '[]'::json)
+      select coalesce(
+        json_agg(
+          jsonb_set(
+            to_jsonb(p),
+            '{member_role}',
+            coalesce(to_jsonb(pm.role::text), 'null'::jsonb),
+            true
+          )::json
+        ),
+        '[]'::json
+      )
       from public.projects p
       join public.project_members pm on pm.project_id = p.id
       where pm.user_id = auth.uid()

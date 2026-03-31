@@ -15,7 +15,9 @@
         android:theme="@style/Theme.ToolApp_v2">
         <activity
             android:name=".MainActivity"
+            android:configChanges="keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout"
             android:exported="true"
+            android:importantForAutofill="yes"
             android:label="@string/app_name"
             android:theme="@style/Theme.ToolApp_v2">
             <intent-filter>

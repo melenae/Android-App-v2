@@ -5,9 +5,7 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * Общий отладочный лог для экрана Настройка.
- * Доступен до показа MainScreen (например, с LoginScreen при входе через Supabase),
- * чтобы ответ Supabase можно было записать и увидеть на закладке Настройка.
+ * Текстовый лог на экране «Настройка»: чтение адреса таблицы в карточке проекта и результат выгрузки тайминга в Google Sheets.
  */
 object AppDebugLog {
     private const val MAX_CHARS = 80_000

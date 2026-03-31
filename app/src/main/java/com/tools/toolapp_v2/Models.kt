@@ -153,6 +153,7 @@ data class ProjectLogs(
     var type: String,
     var date: Long,
     var roadMap: RoadMap? = null,
+    var company: Companies? = null,
     /** Участвует в учёте времени на закладке Timing. */
     var onTiming: Boolean = false,
     /** Тип источника при загрузке: GoogleTab, Xlsx, Json, Csv. При экспорте — куда писать. */
@@ -218,8 +219,26 @@ data class Projects(
     /** Уникальный идентификатор (GUID в стиле 1C) для обмена и имён файлов. */
     val slug: String,
     /** Ссылка на Google Таблицу с данными проекта (заявки, заметки, журнал). Загрузка и запись — по этой таблице. */
-    var source: String = ""
+    var source: String = "",
+    /**
+     * Роль текущего пользователя в проекте из project_members.role (app_init, поле member_role).
+     * Значение PROJECT_MEMBER_ROLE_PM — руководитель: из Google загружаются все строки листов проекта.
+     */
+    var memberRole: String? = null
 )
+
+/** Роль руководителя проекта в project_members; при совпадении — полная загрузка строк таблицы Google по проекту. */
+const val PROJECT_MEMBER_ROLE_PM = "PM"
+
+/** В app_init для текущего пользователя в этом проекте указана роль руководителя (см. PROJECT_MEMBER_ROLE_PM). */
+fun Projects.isMemberRolePm(): Boolean {
+    val r = memberRole?.trim()?.takeIf { it.isNotEmpty() } ?: return false
+    if (r.equals(PROJECT_MEMBER_ROLE_PM, ignoreCase = true)) return true
+    // Частые обозначения в БД (латиница/кириллица)
+    if (r.equals("РП", ignoreCase = true)) return true
+    if (r.equals("RP", ignoreCase = true)) return true
+    return false
+}
 
 
 /**
@@ -227,6 +246,18 @@ data class Projects(
  * Одна логика везде: при загрузке из Excel/Google Таблицы, в настройках и при выгрузке.
  */
 fun userDisplayId(displayName: String, email: String): String = "$displayName ($email)"
+
+/** Первая строка карточки: название проекта; при указанном графике — «Проект (график)». */
+fun projectLineWithOptionalRoadMap(project: Projects?, roadMap: RoadMap?): String {
+    val p = project?.name?.trim().orEmpty()
+    val r = roadMap?.name?.trim().orEmpty()
+    return when {
+        p.isNotEmpty() && r.isNotEmpty() -> "$p ($r)"
+        p.isNotEmpty() -> p
+        r.isNotEmpty() -> "($r)"
+        else -> ""
+    }
+}
 
 data class Users(
     /**
@@ -256,7 +287,7 @@ enum class IssueStatuses(val displayName: String) {
     NEW("Новая"),
     IN_PROGRESS("В работе"),
     AWAITING("Ожидает"),
-    TESTING("На приемке"),
+    TESTING("Приемка"),
     DONE("Выполнена"),
     CLOSED("Закрыта");
 
